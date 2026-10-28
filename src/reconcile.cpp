@@ -10,6 +10,12 @@ constexpr int64_t tolerance = 350000;
 int64_t micros(uint64_t sample) {
   return static_cast<int64_t>(sample / 16000 * 1000000 + sample % 16000 * 1000000 / 16000);
 }
+const std::string& rendered(const pb::SpeechToken& token) {
+  return token.has_rendered_text() ? token.rendered_text() : token.text();
+}
+size_t token_bytes(const pb::SpeechToken& token) {
+  return token.text().size() + (token.has_rendered_text() ? token.rendered_text().size() : 0);
+}
 std::string key(const std::string& text) {
   std::string result;
   for (unsigned char c : text) {
@@ -45,8 +51,8 @@ struct Run { size_t score = 0, count = 0; long double distance = 0; };
 struct Match { size_t old_start = 0, new_start = 0; Run run; bool ambiguous = false; };
 Match anchor(const std::vector<pb::SpeechToken>& old, const std::vector<pb::SpeechToken>& fresh, int64_t end) {
   std::vector<std::string> a, b;
-  for (const auto& t : old) a.push_back(key(t.text()));
-  for (const auto& t : fresh) b.push_back(key(t.text()));
+  for (const auto& t : old) a.push_back(key(rendered(t)));
+  for (const auto& t : fresh) b.push_back(key(rendered(t)));
   std::vector<Run> next(fresh.size() + 1), row(fresh.size() + 1);
   Match best;
   for (size_t i = old.size(); i-- > 0;) {
@@ -72,7 +78,7 @@ Match anchor(const std::vector<pb::SpeechToken>& old, const std::vector<pb::Spee
 }
 std::string joined_key(const std::vector<pb::SpeechToken>& tokens, size_t begin, size_t end) {
   std::string result;
-  for (size_t i = begin; i < end; ++i) result += key(tokens[i].text());
+  for (size_t i = begin; i < end; ++i) result += key(rendered(tokens[i]));
   return result;
 }
 }
@@ -90,7 +96,7 @@ void Reconciler::output(size_t count, bool final, pb::ReconciliationStatus statu
   double log_sum = 0; bool has_logs = true;
   for (size_t i = 0; i < count; ++i) {
     const auto& token = pending_[i];
-    *segment.add_tokens() = token; *segment.mutable_text() += token.text();
+    *segment.add_tokens() = token; *segment.mutable_text() += rendered(token);
     start = std::min(start, token.start_us()); end = std::max(end, token.end_us());
     has_logs &= token.has_whisper();
     if (token.has_whisper()) log_sum += token.whisper().log_probability();
@@ -131,7 +137,7 @@ void Reconciler::accept(const pb::SpeechHypothesis& h, uint32_t overlap) {
       if (token.kind() == pb::SPEECH_TOKEN_KIND_CONTROL) continue;
       if (token.kind() != pb::SPEECH_TOKEN_KIND_TEXT || !token.has_start_us() || !token.has_end_us() || token.end_us() < token.start_us())
         throw Failure(grpc::StatusCode::FAILED_PRECONDITION, "reconciliation requires classified lexical tokens with timings");
-      fresh.push_back(token); text += token.text(); text_bytes += token.text().size();
+      fresh.push_back(token); text += rendered(token); text_bytes += token_bytes(token);
       if (fresh.size() > token_limit || text_bytes > text_limit)
         throw Failure(grpc::StatusCode::RESOURCE_EXHAUSTED, "reconciliation context limit exceeded");
       if (token.start_us() < start || token.end_us() > end) {
@@ -175,13 +181,13 @@ void Reconciler::accept(const pb::SpeechHypothesis& h, uint32_t overlap) {
   if (pending_.size() > token_limit) throw Failure(grpc::StatusCode::RESOURCE_EXHAUSTED, "reconciliation context limit exceeded");
   if (invalid_timing || uncertain_) status = pb::RECONCILIATION_STATUS_UNRESOLVED;
   size_t merged_bytes = 0;
-  for (const auto& token : pending_) merged_bytes += token.text().size();
+  for (const auto& token : pending_) merged_bytes += token_bytes(token);
   if (merged_bytes > text_limit) throw Failure(grpc::StatusCode::RESOURCE_EXHAUSTED, "reconciliation text limit exceeded");
   size_t stable = 0, safe_boundary = 0; std::string prefix;
   const auto cutoff = end - micros(overlap);
   for (const auto& token : pending_) {
     if (overlap && token.end_us() > cutoff) break;
-    ++stable; prefix += token.text(); if (utf8(prefix)) safe_boundary = stable;
+    ++stable; prefix += rendered(token); if (utf8(prefix)) safe_boundary = stable;
   }
   output(safe_boundary, true, status);
   uncertain_ = !pending_.empty() && status == pb::RECONCILIATION_STATUS_UNRESOLVED;

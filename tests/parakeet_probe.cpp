@@ -1,5 +1,6 @@
 // Native backend qualification only. This is not a service adapter.
 #include "decoder.h"
+#include "reconcile.h"
 #include "parakeet.h"
 #include <algorithm>
 #include <atomic>
@@ -61,17 +62,50 @@ int main(int argc, char** argv) {
     // Reuse the same state after cancellation; no stale partial result may leak.
     check(parakeet_full_with_state(model.get(), state.get(), infer, samples.data(), samples.size())==0,
           "native Parakeet inference failed");
+    media::pb::SpeechHypothesis hypothesis;
+    hypothesis.set_window_number(1); hypothesis.set_sample_count(samples.size());
     std::string text;
     int tokens = 0;
     for (int s=0; s<parakeet_full_n_segments_from_state(state.get()); ++s) {
-      text += parakeet_full_get_segment_text_from_state(state.get(), s);
+      const std::string native_text = parakeet_full_get_segment_text_from_state(state.get(), s);
+      text += native_text;
+      auto* segment = hypothesis.add_segments();
+      segment->set_segment_id(media::uuid()); segment->set_revision(1);
+      segment->set_text(native_text); segment->set_task(media::pb::SPEECH_TASK_TRANSCRIBE);
+      std::string rendered;
       for (int t=0; t<parakeet_full_n_tokens_from_state(state.get(), s); ++t) {
         const auto token = parakeet_full_get_token_data_from_state(state.get(), s, t);
         check(token.t0>=0 && token.t1>=token.t0 && std::isfinite(token.p) && token.p>=0 && token.p<=1,
               "invalid native Parakeet token metadata");
+        const char* raw = parakeet_full_get_token_text_from_state(model.get(), state.get(), s, t);
+        const int size = parakeet_token_to_text(raw, t==0, nullptr, 0);
+        check(size>=0 && size<65536, "unbounded native detokenized token");
+        std::string contribution(size+1, '\0');
+        check(parakeet_token_to_text(raw, t==0, contribution.data(), contribution.size())==size,
+              "native detokenization size changed");
+        contribution.resize(size); rendered += contribution;
+        auto* typed = segment->add_tokens();
+        typed->set_token_id(token.id); typed->set_text(raw); typed->set_rendered_text(contribution);
+        typed->set_kind(media::pb::SPEECH_TOKEN_KIND_TEXT);
+        typed->set_probability(token.p);
+        typed->set_start_us(token.t0*10000); typed->set_end_us(token.t1*10000);
         ++tokens;
       }
+      check(rendered==native_text, "native token rendering differs from segment text");
     }
+    std::string reconciled;
+    size_t preserved_tokens = 0;
+    media::Reconciler reconciler([&](media::pb::TranscriptSegment segment) {
+      if (!segment.final()) return;
+      reconciled += segment.text();
+      for (const auto& token : segment.tokens()) {
+        check(token.has_rendered_text() && !token.text().empty(), "native token bytes lost in reconciliation");
+        ++preserved_tokens;
+      }
+    });
+    reconciler.accept(hypothesis, 0); reconciler.finish();
+    check(reconciled==text && preserved_tokens==static_cast<size_t>(tokens),
+          "native Parakeet reconciliation changed text or lost tokens");
     check(tokens>0 && digest.size()==32, "Parakeet probe lacks tokens or model hash");
     std::cout << text << '\n';
     std::string normalized; bool space = false;
@@ -82,6 +116,6 @@ int main(int argc, char** argv) {
     }
     check(normalized=="and so my fellow americans ask not what your country can do for you ask what you can do for your country",
           "Parakeet reference words differ");
-    std::cout << "Native Parakeet loading, cancellation recovery, reference transcription and token metadata passed\n";
+    std::cout << "Native Parakeet loading, cancellation recovery, reference transcription, token metadata and typed reconciliation passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

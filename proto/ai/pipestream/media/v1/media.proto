@@ -627,6 +627,9 @@ message SpeechToken {
   SpeechTokenKind kind = 6;
   // Native Whisper values, preserving confidence and timing diagnostics.
   WhisperTokenMetadata whisper = 7;
+  // Text contribution after native detokenization. Absent means use text bytes.
+  // May be empty or a partial UTF-8 sequence; concatenate before validation.
+  optional bytes rendered_text = 8;
 }
 
 // Semantic role of a model token; control tokens are retained but not rendered.

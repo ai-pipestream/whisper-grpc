@@ -67,6 +67,53 @@ int main() {
   timing.accept(window(2,48000,64000,{{" old",3300000,3900000},{" tail",6300000,6700000}}),16000);
   timing.finish();
   check(out.back().final() && out.back().text()==" tail" && out.back().reconciliation()==pb::RECONCILIATION_STATUS_UNRESOLVED);
+  // Native vocabulary bytes are retained while rendered text drives alignment.
+  out.clear(); Reconciler pieces([&](auto s){out.push_back(std::move(s));});
+  auto first=window(1,0,0,{{" hello",100000,1000000},{" world",3200000,3700000}});
+  auto* token=first.mutable_segments(0)->mutable_tokens(1);
+  token->set_text("▁world"); token->set_rendered_text(" world"); token->set_token_id(42);
+  pieces.accept(first,16000);
+  auto second=window(2,48000,64000,{{"World",3300000,3750000},{" again",4000000,4500000}});
+  token=second.mutable_segments(0)->mutable_tokens(0);
+  token->set_text("▁World"); token->set_rendered_text("World"); token->set_token_id(43);
+  pieces.accept(second,0); pieces.finish();
+  check(out.size()==3 && out.back().final() && out.back().text()=="World again");
+  check(out.back().reconciliation()==pb::RECONCILIATION_STATUS_ALIGNED);
+  check(out.back().tokens(0).text()=="▁World" && out.back().tokens(0).rendered_text()=="World" &&
+        out.back().tokens(0).token_id()==43);
+  // Presence matters: an explicitly empty rendering must not expose vocabulary markers.
+  out.clear(); Reconciler empty_piece([&](auto s){out.push_back(std::move(s));});
+  auto empty=window(1,0,0,{{"",100000,200000},{"word",200000,300000}});
+  token=empty.mutable_segments(0)->mutable_tokens(0);
+  token->set_text("▁"); token->set_rendered_text("");
+  empty_piece.accept(empty,0); empty_piece.finish();
+  check(out.size()==1 && out[0].text()=="word" && out[0].tokens(0).text()=="▁");
+  // Native byte tokens can render partial UTF-8; only complete text may be finalized.
+  out.clear(); Reconciler rendered_unicode([&](auto s){out.push_back(std::move(s));});
+  auto split=window(1,0,0,{{" \xc3",2000000,2500000},{"\xa9",3100000,3400000}});
+  token=split.mutable_segments(0)->mutable_tokens(0);
+  token->set_rendered_text(token->text()); token->set_text("<0xC3>");
+  token=split.mutable_segments(0)->mutable_tokens(1);
+  token->set_rendered_text(token->text()); token->set_text("<0xA9>");
+  rendered_unicode.accept(split,16000);
+  check(out.size()==1 && !out[0].final());
+  rendered_unicode.finish();
+  check(out.size()==2 && out[1].final() && out[1].text()==" \xc3\xa9" &&
+        out[1].tokens(0).text()=="<0xC3>" && out[1].tokens(1).text()=="<0xA9>");
+  // Both representations count against the bound, including native bytes that render empty.
+  Reconciler huge([](auto){});
+  auto oversized=window(1,0,0,{{"",100000,200000}});
+  token=oversized.mutable_segments(0)->mutable_tokens(0);
+  token->set_text(std::string(128*1024+1,'x')); token->set_rendered_text("");
+  failed=false; try {huge.accept(oversized,0);} catch(const Failure& e) {
+    failed=e.code==grpc::StatusCode::RESOURCE_EXHAUSTED;
+  } check(failed);
+  Reconciler mismatch([](auto){});
+  auto bad=window(1,0,0,{{"word",100000,200000}});
+  bad.mutable_segments(0)->mutable_tokens(0)->set_rendered_text("different");
+  failed=false; try {mismatch.accept(bad,0);} catch(const Failure& e) {
+    failed=e.code==grpc::StatusCode::DATA_LOSS;
+  } check(failed);
   std::cout<<"reconciliation cases passed\n";
  } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

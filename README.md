@@ -38,7 +38,10 @@ The test is not registered without a model path; ordinary test success does
 not imply model qualification. Model assets are never downloaded by a request.
 
 The reconciler keeps a bounded provisional tail and joins overlapping
-lexical tokens using text and source-time evidence. It emits stable segment IDs
+lexical tokens using text and source-time evidence. Native vocabulary bytes are
+retained in `SpeechToken.text`; optional `rendered_text` carries the native
+detokenized contribution used for matching and display. Both byte forms count
+against the reconciliation memory bound. It emits stable segment IDs
 with increasing revisions, preserves competing text as `UNRESOLVED` when a join
 is ambiguous, and stops after validation or delivery failure. Raw hypotheses
 remain separate from these derived revisions. `reconcile_tests` covers repeated
@@ -92,8 +95,9 @@ Validate the draft contract with `buf lint` and `buf build`.
 ### Alternative native speech backend qualification
 
 The pinned whisper.cpp source includes the native Parakeet C API. An opt-in
-`parakeet_probe` target checks buffer-based model loading, cancellation recovery, reference transcription
-and native token metadata. This is qualification tooling, not an implemented
+`parakeet_probe` target checks buffer-based model loading, cancellation recovery, reference transcription,
+native token metadata, native detokenization and typed transcript reconciliation.
+This is qualification tooling, not an implemented
 gRPC backend: service discovery continues to advertise only the loaded Whisper
 model. Parakeet transcription must not be advertised as translation support.
 
