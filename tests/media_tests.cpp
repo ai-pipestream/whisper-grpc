@@ -413,7 +413,8 @@ void wire_live_decoding() {
   // Use six seconds so the first half includes that probe, while holding back
   // three full seconds until actual PCM arrives. NUT has no such startup probe.
   for (const auto& fixture : {std::pair{wav_fixture(16000, 1, 6), uint64_t{96000}},
-                              std::pair{nut_fixture(), uint64_t{48000}}}) {
+                              std::pair{nut_fixture(), uint64_t{48000}},
+                              std::pair{matroska_fixture().bytes, uint64_t{48000}}}) {
     const auto& data = fixture.first;
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + 5s);

@@ -1,6 +1,12 @@
 #include "pipeline.h"
 #include "service.h"
 #include "worker.h"
+#include "decoder.h"
+#include "media_fixture.h"
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstring>
 #include <grpcpp/grpcpp.h>
 #include <atomic>
 #include <cstdlib>
@@ -34,7 +40,24 @@ struct Server {
 int main(int argc, char** argv) {
   try {
     if (argc != 4) throw std::runtime_error("usage: pipeline_tests WHISPER_MODEL VAD_MODEL JFK_WAV");
-    const auto weights = read(argv[1]), vad = read(argv[2]), data = read(argv[3]);
+    const auto weights = read(argv[1]), vad = read(argv[2]), wav = read(argv[3]);
+    size_t audio_offset = 0; std::string pcm16;
+    pb::DecodeOptions decode; decode.set_emit_audio(true);
+    media::decode_media([&](uint8_t* out, int capacity) {
+      const auto n = std::min(wav.size()-audio_offset, static_cast<size_t>(capacity));
+      std::memcpy(out, wav.data()+audio_offset, n); audio_offset+=n; return static_cast<int>(n);
+    }, [&](pb::StreamEvent event) {
+      if (!event.has_audio()) return;
+      const auto& pcm = event.audio().pcm_f32le();
+      for (size_t i=0; i<pcm.size(); i+=4) {
+        uint32_t bits=0;
+        for (int b=0; b<4; ++b) bits |= static_cast<uint32_t>(static_cast<unsigned char>(pcm[i+b])) << (8*b);
+        const auto value = static_cast<int16_t>(std::clamp(std::lround(std::bit_cast<float>(bits)*32768), -32768L, 32767L));
+        pcm16.push_back(static_cast<char>(static_cast<uint16_t>(value)&255));
+        pcm16.push_back(static_cast<char>(static_cast<uint16_t>(value)>>8));
+      }
+    }, [] {return false;}, decode);
+    const auto video_fixture = matroska_fixture(pcm16);
     media::SpeechModel model(weights, "test-tiny.en", 4);
     media::SpeechWorker worker(model); Server worker_server(worker);
     media::SpeechPipelineFactory factory(worker_server.address(), vad);
@@ -45,11 +68,15 @@ int main(int argc, char** argv) {
     raw->set_model_id("test-tiny.en"); raw->set_reconcile_transcript(false);
     factory.resolve(raw_only);
     check(!raw_only.speech(0).reconcile_transcript() && !raw_only.speech(0).word_timestamps(), "raw-only option overridden");
-    for (bool smart : {false, true}) {
+    for (int mode : {0, 1, 2}) {
+      const bool smart = mode==2, video = mode!=0;
+      const auto& data = video ? video_fixture.bytes : wav;
+      size_t video_packets = 0;
       grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now() + 90s);
       auto rpc = stub->Ingest(&context);
       pb::IngestRequest open;
-      open.mutable_open()->mutable_direct()->set_name("reference.wav");
+      open.mutable_open()->mutable_direct()->set_name(video ? "reference.mkv" : "reference.wav");
+      open.mutable_open()->mutable_decode()->set_emit_packets(video);
       auto* speech = open.mutable_open()->add_speech();
       speech->set_model_id("test-tiny.en");
       if (smart) speech->set_language("en");
@@ -108,12 +135,21 @@ int main(int argc, char** argv) {
       while (rpc->Read(&response)) {
         const auto& event = response.event();
         if (event.has_source()) source += event.source().data();
+        if (video && event.has_packet() && event.packet().track_id()==1) {
+          evidence_ok &= video_packets < video_fixture.video_packets.size() &&
+                         event.packet().data()==video_fixture.video_packets[video_packets];
+          ++video_packets;
+        }
         if (event.has_hypothesis()) {
           saw_hypothesis = true; ++hypotheses;
           const auto& h = event.hypothesis();
           evidence_ok &= event.producer().model_sha256() == model.model_hash() && h.contributors_size() == 1;
           if (smart) evidence_ok &= h.contributors(0).model_sha256() == media::sha256(vad);
-          for (const auto& segment : h.segments()) { text += segment.text(); evidence_ok &= !segment.final(); }
+          for (const auto& segment : h.segments()) {
+            text += segment.text();
+            evidence_ok &= !segment.final() && segment.source_language()=="en" &&
+                           segment.output_language()=="en" && segment.task()==pb::SPEECH_TASK_TRANSCRIBE;
+          }
         }
         if (event.has_transcript()) {
           const auto& t = event.transcript();
@@ -121,7 +157,8 @@ int main(int argc, char** argv) {
             const auto& prior = revisions.at(t.segment_id());
             evidence_ok &= !prior.final() && t.revision() == prior.revision()+1;
           } else evidence_ok &= t.revision()==1;
-          evidence_ok &= t.producer().service()=="whisper-media-reconciliation" && t.contributors_size()==2 &&
+          evidence_ok &= t.source_language()=="en" && t.output_language()=="en" &&
+                         t.task()==pb::SPEECH_TASK_TRANSCRIBE && t.producer().service()=="whisper-media-reconciliation" && t.contributors_size()==2 &&
                          t.contributors(0).model_sha256()==model.model_hash();
           if (t.final()) final_text += t.text();
           revisions[t.segment_id()] = t;
@@ -145,6 +182,7 @@ int main(int argc, char** argv) {
         check(normalized == "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
               "streamed final transcript lost or duplicated boundary words");
       }
+      if (video) check(video_packets==video_fixture.video_packets.size(), "speech processing lost compressed video packets");
       check(!revisions.empty(), "no reconciled transcript published");
       for (const auto& [segment_id, segment] : revisions) check(segment.final(), "provisional tail not flushed before close");
       check(source == data && hypotheses >= 2 && evidence_ok, "pipeline source or provenance mismatch");
@@ -160,7 +198,7 @@ int main(int argc, char** argv) {
       for (const auto& segment : item.snapshot().transcripts())
         check(revisions.at(segment.segment_id()).SerializeAsString()==segment.SerializeAsString(), "hydration lost final revision or provenance");
       subscribe_context.TryCancel(); while (listener->Read(&item)) {} listener->Finish();
-      std::cout << (smart ? "Smart" : "Fixed") << " ingress -> worker -> hydrated output passed\n";
+      std::cout << (smart ? "Smart Matroska video" : video ? "Fixed Matroska video" : "Fixed WAV") << " ingress -> worker -> hydrated output passed\n";
     }
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

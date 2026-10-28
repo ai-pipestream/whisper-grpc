@@ -200,7 +200,11 @@ ingress-to-worker tests in fixed and speech-aware modes, holds back the final
 quarter of the upload until a hypothesis arrives, checks original-byte and
 provenance integrity, verifies transcript revisions through a separate gRPC
 subscription, and checks closed-stream hypothesis and latest-revision hydration.
-The fixed-overlap case asserts the exact reference word sequence.
+Fixed-overlap cases assert the exact reference word sequence for both WAV
+and Matroska carrying the same speech plus MJPEG video. A speech-aware Matroska
+case also exercises VAD, packet preservation and hydrated final revisions.
+The video tests cover this codec/container combination, not H.264, HEVC,
+fragmented MP4 or a general video-accuracy benchmark.
 
 To qualify the packaged worker with real inference, run
 `scripts/smoke-worker.sh IMAGE /path/to/ggml-tiny.en.bin /path/to/jfk.wav`
@@ -254,7 +258,7 @@ to return a chunk before the client sends its finish message, reconstructs
 binary source data, and checks full SHA-256 accounting. Additional tests cover
 concurrent snapshot/live transitions, future-stream selectors, replay eviction,
 slow subscribers, cancellation and malformed lifecycle messages. These tests
-include native WAV/NUT media decoding but do not establish speech-recognition
+include native WAV/NUT/Matroska media decoding but do not establish speech-recognition
 correctness.
 
 ## HTTP input
@@ -316,7 +320,11 @@ and a configuration digest incorporating the accepted decode options.
 The allowlist currently includes WAV, MP3, FLAC, Ogg, MOV/MP4, Matroska/WebM,
 MPEG-TS, AAC and NUT. This is a decoder allowlist, not a claim that every codec
 and container combination has passed qualification. Current generated fixtures
-verify PCM WAV and NUT containing PCM audio plus raw RGB video. Codec
+verify PCM WAV, NUT containing PCM audio plus raw RGB video, and live
+Matroska containing PCM audio plus compressed MJPEG video. The Matroska fixture
+is encoded and muxed in memory using native FFmpeg APIs. Tests compare every
+compressed video packet with the encoder output and verify presentation times,
+audio sample counts and original container bytes. Codec
 availability depends on the native FFmpeg build. The live gRPC tests hold back
 the final half of each input until decoded PCM arrives, verify all output
 samples and preserve the complete original source digest.

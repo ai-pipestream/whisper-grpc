@@ -104,6 +104,29 @@ void video_and_audio() {
   verify(title && video, "container or video metadata missing");
   verify(video_packets == 30 && audio_packets == 30 && samples == 48000, "audio/video content lost");
 }
+void compressed_video_and_audio() {
+  const auto fixture = matroska_fixture();
+  const auto result = decode(fixture.bytes, all());
+  verify(result.read_at_first_audio > 0 && result.read_at_first_audio < fixture.bytes.size(),
+         "Matroska decoder buffered until EOF");
+  size_t packets = 0; uint64_t samples = 0; bool metadata = false;
+  for (const auto& event : result.events) {
+    if (event.has_media_info())
+      for (const auto& track : event.media_info().tracks())
+        metadata |= track.kind()==pb::TRACK_KIND_VIDEO && track.codec_name()=="mjpeg" && track.width()==64 && track.height()==64;
+    if (event.has_packet() && event.packet().track_id()==1) {
+      const auto& packet = event.packet();
+      verify(packets < fixture.video_packets.size() && packet.data()==fixture.video_packets[packets],
+             "compressed video packet changed");
+      verify(packet.has_pts() && packet.pts()*packet.time_base().numerator()*10 ==
+             static_cast<int64_t>(packets)*packet.time_base().denominator(), "compressed video timestamp changed");
+      ++packets;
+    }
+    if (event.has_audio()) samples += event.audio().pcm_f32le().size()/4;
+  }
+  verify(metadata && packets==30 && samples==48000, "Matroska track or payload missing");
+}
+
 void malformed_and_cancelled() {
   bool failed = false;
   try { decode("not a media container", all()); }
@@ -155,9 +178,10 @@ int main() {
     wave_live_and_exact_samples();
     resample_stereo();
     video_and_audio();
+    compressed_video_and_audio();
     malformed_and_cancelled();
     packet_fragmentation();
-    std::cout << "5 native media tests passed\n";
+    std::cout << "6 native media tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;
