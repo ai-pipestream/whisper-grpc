@@ -325,6 +325,40 @@ class RunningServer {
   ~RunningServer() { if (server) server->Shutdown(std::chrono::system_clock::now() + 1s); }
 };
 
+void subscriber_disconnect_isolation() {
+  RunningServer running;
+  grpc::ClientContext input_context, cancelled_context, observer_context;
+  for (auto* context : {&input_context, &cancelled_context, &observer_context})
+    context->set_deadline(std::chrono::system_clock::now()+5s);
+  auto input = running.client->Ingest(&input_context);
+  pb::IngestRequest request; *request.mutable_open() = open_request();
+  check(input->Write(request), "isolation input open failed");
+  pb::IngestResponse response;
+  check(input->Read(&response) && response.event().has_opened(), "isolation handshake missing");
+  pb::SubscribeRequest selection; selection.add_stream_ids(response.event().cursor().stream_id());
+  selection.mutable_hydration()->set_metadata(true);
+  auto cancelled = running.client->Subscribe(&cancelled_context, selection);
+  auto observer = running.client->Subscribe(&observer_context, selection);
+  pb::SubscribeResponse item;
+  for (auto* listener : {cancelled.get(), observer.get()}) {
+    check(listener->Read(&item) && item.has_snapshot_begin(), "isolation snapshot begin missing");
+    check(listener->Read(&item) && item.has_snapshot(), "isolation snapshot missing");
+    check(listener->Read(&item) && item.has_snapshot_end(), "isolation snapshot end missing");
+  }
+  cancelled_context.TryCancel(); while (cancelled->Read(&item)) {}
+  check(cancelled->Finish().error_code()==grpc::StatusCode::CANCELLED, "listener cancellation failed");
+  request.Clear(); *request.mutable_chunk() = chunk(1, "still flowing");
+  check(input->Write(request), "cancelled listener stopped input");
+  check(input->Read(&response) && response.event().has_source(), "input response stopped after listener cancellation");
+  check(observer->Read(&item) && item.event().source().data()=="still flowing", "other listener lost data");
+  input_context.TryCancel(); while (input->Read(&response)) {}
+  check(input->Finish().error_code()==grpc::StatusCode::CANCELLED, "input cancellation ignored");
+  check(observer->Read(&item) && item.event().has_closed() &&
+        item.event().closed().status_code()==grpc::StatusCode::CANCELLED &&
+        item.event().closed().source_sha256()==media::sha256("still flowing"), "observer lost cancelled input accounting");
+  observer_context.TryCancel(); while (observer->Read(&item)) {} observer->Finish();
+}
+
 void wire_streaming_and_integrity() {
   RunningServer running;
   grpc::ClientContext context;
@@ -489,7 +523,7 @@ int main() {
     const auto cases = {uuid_selection_and_future_streams, snapshot_live_atomicity,
                         transcript_revisions, closed_stream_reclamation,
                         replay_eviction_and_filtering, subscriber_backpressure_isolation,
-                        bounded_registry_and_capabilities, wire_streaming_and_integrity,
+                        bounded_registry_and_capabilities, subscriber_disconnect_isolation, wire_streaming_and_integrity,
                         malformed_wire_input, wire_live_decoding};
     for (auto test : cases) test();
     std::cout << cases.size() << " media protocol tests passed\n";

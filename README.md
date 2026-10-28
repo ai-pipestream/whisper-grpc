@@ -261,6 +261,14 @@ slow subscribers, cancellation and malformed lifecycle messages. These tests
 include native WAV/NUT/Matroska media decoding but do not establish speech-recognition
 correctness.
 
+Cancellation coverage includes two simultaneous subscribers: cancelling one
+leaves ingestion and the other listener running. Cancelling ingestion publishes
+a terminal cancellation event with the accepted source byte count and hash.
+With `MEDIA_TEST_MODEL` configured, `pipeline_cancellation_tests` holds 31 worker
+streams open, proves ingress occupies the final slot, then cancels ingress and
+opens a replacement worker stream. This verifies downstream resource release
+using real gRPC calls and a loaded model, without requiring inference.
+
 ## HTTP input
 
 Use `MediaService.Pull` with `PullRequest.open.http.url` and the same decode
