@@ -112,6 +112,24 @@ WHISPER_MODEL_PATH=/absolute/path/to/ggml-tiny.en.bin \
   docker compose --profile speech up --build
 ```
 
+For the complete CPU speech stack, including smart chunking, use the standalone
+`compose.speech.yaml`. It wires ingress to the worker and mounts both models
+read-only; no worker address or extra Compose overlay is required:
+
+```sh
+WHISPER_MODEL_PATH=/absolute/path/to/ggml-tiny.en.bin \
+WHISPER_VAD_MODEL_PATH=/absolute/path/to/ggml-silero-v5.1.2.bin \
+  docker compose -f compose.speech.yaml up --build
+```
+
+Both paths must name existing files; missing paths fail without creating host
+directories. Models are provisioned before startup, never downloaded by a
+request. `WHISPER_IMAGE` selects a previously built image for `up --no-build`;
+the default local image is built from this checkout, not a published release.
+`WHISPER_MEDIA_PORT` and `WHISPER_WORKER_PORT` override the loopback host ports.
+Service startup order does not imply model readiness: wait for each service's
+gRPC health response before sending work.
+
 The worker listens on loopback port 50073, with the weights mounted read-only.
 It accepts up to 32 open track/task RPCs per instance, with one inference slot.
 Concurrent inference requests beyond that slot return RESOURCE_EXHAUSTED,
@@ -133,9 +151,9 @@ Set `WHISPER_WORKER_TARGET` on media ingress to enable speech processing.
 Requests may contain up to four speech tasks and 32 track/task pairs total.
 Fixed windows default to 10 seconds with one second of overlap. To enable
 speech-aware requests on the native media executable, set
-`WHISPER_VAD_MODEL_PATH` to the qualified model file at startup. Container
-deployments must mount that file read-only and set its in-container path;
-the base Compose profile does not mount VAD weights yet. Requests select
+`WHISPER_VAD_MODEL_PATH` to the qualified model file at startup. The complete
+`compose.speech.yaml` deployment mounts that file read-only and sets its
+in-container path. The transport-only `compose.yaml` does not mount VAD weights. Requests select
 `silero-v5.1.2` and supply pause duration, padding, hard limit and no-pause
 policy. The current detector threshold is 0.5. Resolved options are echoed
 in the opening event. Without a worker target, speech requests fail explicitly.

@@ -6,27 +6,27 @@ if [ "$#" -ne 4 ]; then
   exit 2
 fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-image=$1
-model=$(realpath "$2")
-vad=$(realpath "$3")
+WHISPER_IMAGE=$1
+WHISPER_MODEL_PATH=$(realpath "$2")
+WHISPER_VAD_MODEL_PATH=$(realpath "$3")
 fixture=$(realpath "$4")
-network=whisper-grpc-smoke-$$
-worker_container=
-media_container=
+WHISPER_MODEL_ID=test-tiny.en
+WHISPER_MEDIA_PORT=0
+WHISPER_WORKER_PORT=0
+export WHISPER_IMAGE WHISPER_MODEL_PATH WHISPER_VAD_MODEL_PATH
+export WHISPER_MODEL_ID WHISPER_MEDIA_PORT WHISPER_WORKER_PORT
+project=whisper-grpc-smoke-$$
+compose() { docker compose -p "$project" -f "$root/compose.speech.yaml" "$@"; }
 cleanup() {
   status=$?
-  if [ "$status" -ne 0 ]; then
-    [ -z "$media_container" ] || docker logs "$media_container" >&2 || true
-    [ -z "$worker_container" ] || docker logs "$worker_container" >&2 || true
-  fi
-  [ -z "$media_container" ] || docker stop "$media_container" >/dev/null || true
-  [ -z "$worker_container" ] || docker stop "$worker_container" >/dev/null || true
-  docker network rm "$network" >/dev/null || true
+  if [ "$status" -ne 0 ]; then compose logs >&2 || true; fi
+  compose down >/dev/null || true
 }
-docker network create "$network" >/dev/null
+compose config --quiet
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
+compose up -d --no-build
 wait_ready() {
   endpoint=$1
   attempt=0
@@ -40,20 +40,12 @@ wait_ready() {
   done
   return 1
 }
-worker_container=$(docker run -d --rm --read-only --cap-drop ALL \
-  --security-opt no-new-privileges:true --network "$network" --network-alias worker \
-  -p 127.0.0.1::50073 --mount "type=bind,src=$model,dst=/models/model.bin,readonly" \
-  -e WHISPER_WORKER_LISTEN=0.0.0.0:50073 -e WHISPER_MODEL_PATH=/models/model.bin \
-  -e WHISPER_MODEL_ID=test-tiny.en --entrypoint /usr/local/bin/whisper-speech-worker "$image")
-wait_ready "$(docker port "$worker_container" 50073/tcp)"
-media_container=$(docker run -d --rm --read-only --cap-drop ALL \
-  --security-opt no-new-privileges:true --network "$network" -p 127.0.0.1::50072 \
-  --mount "type=bind,src=$vad,dst=/models/vad.bin,readonly" \
-  -e WHISPER_WORKER_TARGET=worker:50073 -e WHISPER_VAD_MODEL_PATH=/models/vad.bin "$image")
-media_endpoint=$(docker port "$media_container" 50072/tcp)
+wait_ready "$(compose port speech 50073)"
+media_endpoint=$(compose port media 50072)
 wait_ready "$media_endpoint"
-MEDIA_PIPELINE_TEST_TARGET="$media_endpoint" "$root/build/pipeline_tests" "$model" "$vad" "$fixture"
-for container_id in "$media_container" "$worker_container"; do
+MEDIA_PIPELINE_TEST_TARGET="$media_endpoint" "$root/build/pipeline_tests" "$WHISPER_MODEL_PATH" "$WHISPER_VAD_MODEL_PATH" "$fixture"
+for service in media speech; do
+  container_id=$(compose ps -q "$service")
   hardening=$(docker inspect --format \
     'read_only={{.HostConfig.ReadonlyRootfs}} user={{.Config.User}} mounts={{len .Mounts}} writable={{range .Mounts}}{{.RW}}{{end}}' "$container_id")
   test "$hardening" = 'read_only=true user=65532:65532 mounts=1 writable=false'

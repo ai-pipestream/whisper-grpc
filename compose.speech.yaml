@@ -1,0 +1,45 @@
+# Complete CPU speech stack. Supply pre-provisioned Whisper and Silero weights.
+name: whisper-grpc-speech
+x-runtime: &runtime
+  image: ${WHISPER_IMAGE:-local/whisper-grpc:speech}
+  build: .
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+services:
+  media:
+    <<: *runtime
+    depends_on: [speech]
+    ports:
+      - "127.0.0.1:${WHISPER_MEDIA_PORT:-50072}:50072"
+    environment:
+      WHISPER_MACHINE_ID: ${WHISPER_MACHINE_ID:-}
+      WHISPER_WORKER_TARGET: speech:50073
+      WHISPER_VAD_MODEL_PATH: /models/vad.bin
+      WHISPER_HTTP_ORIGINS: ${WHISPER_HTTP_ORIGINS:-}
+      WHISPER_HTTP_ALLOW_PRIVATE: ${WHISPER_HTTP_ALLOW_PRIVATE:-0}
+    volumes:
+      - type: bind
+        source: ${WHISPER_VAD_MODEL_PATH:?Set WHISPER_VAD_MODEL_PATH to the qualified Silero model file}
+        target: /models/vad.bin
+        read_only: true
+        bind:
+          create_host_path: false
+  speech:
+    <<: *runtime
+    entrypoint: ["/usr/local/bin/whisper-speech-worker"]
+    ports:
+      - "127.0.0.1:${WHISPER_WORKER_PORT:-50073}:50073"
+    environment:
+      WHISPER_WORKER_LISTEN: 0.0.0.0:50073
+      WHISPER_MODEL_PATH: /models/model.bin
+      WHISPER_MODEL_ID: ${WHISPER_MODEL_ID:-tiny.en}
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+      WHISPER_MACHINE_ID: ${WHISPER_MACHINE_ID:-}
+    volumes:
+      - type: bind
+        source: ${WHISPER_MODEL_PATH:?Set WHISPER_MODEL_PATH to a Whisper model file}
+        target: /models/model.bin
+        read_only: true
+        bind:
+          create_host_path: false
