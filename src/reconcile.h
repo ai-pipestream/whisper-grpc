@@ -21,5 +21,6 @@ class Reconciler {
   int64_t end_time_ = 0;
   uint32_t track_ = 0;
   bool uncertain_ = false, closed_ = false;
+  bool have_final_text_ = false, final_ends_space_ = false;
 };
 }  // namespace media

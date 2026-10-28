@@ -1,6 +1,7 @@
 #include "reconcile.h"
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <limits>
 
 namespace media {
@@ -94,9 +95,20 @@ void Reconciler::output(size_t count, bool final, pb::ReconciliationStatus statu
   segment.set_reconciliation(status);
   int64_t start = std::numeric_limits<int64_t>::max(), end = std::numeric_limits<int64_t>::min();
   double log_sum = 0; bool has_logs = true;
+  size_t output_bytes = 0;
   for (size_t i = 0; i < count; ++i) {
     const auto& token = pending_[i];
-    *segment.add_tokens() = token; *segment.mutable_text() += rendered(token);
+    auto* emitted = segment.add_tokens(); *emitted = token;
+    const auto& piece = rendered(token);
+    const bool needs_separator = segment.text().empty() ? have_final_text_ && !final_ends_space_ :
+        !std::isspace(static_cast<unsigned char>(segment.text().back()));
+    if (token.has_parakeet() && token.parakeet().is_word_start() && needs_separator &&
+        !piece.empty() && !std::isspace(static_cast<unsigned char>(piece.front())))
+      emitted->set_rendered_text(" " + piece);
+    output_bytes += token_bytes(*emitted);
+    if (output_bytes > text_limit)
+      throw Failure(grpc::StatusCode::RESOURCE_EXHAUSTED, "reconciled token text limit exceeded");
+    *segment.mutable_text() += rendered(*emitted);
     start = std::min(start, token.start_us()); end = std::max(end, token.end_us());
     has_logs &= token.has_whisper();
     if (token.has_whisper()) log_sum += token.whisper().log_probability();
@@ -104,7 +116,10 @@ void Reconciler::output(size_t count, bool final, pb::ReconciliationStatus statu
   if (!utf8(segment.text())) throw Failure(grpc::StatusCode::DATA_LOSS, "reconciled text is not complete UTF-8");
   segment.set_start_us(start); segment.set_end_us(end);
   if (has_logs) segment.set_average_log_probability(log_sum / count);
+  const bool has_text = !segment.text().empty();
+  const bool ends_space = has_text && std::isspace(static_cast<unsigned char>(segment.text().back()));
   emit_(std::move(segment));
+  if (final && has_text) { have_final_text_ = true; final_ends_space_ = ends_space; }
   if (final) { pending_.erase(pending_.begin(), pending_.begin() + count); id_.clear(); revision_ = 0; }
 }
 void Reconciler::accept(const pb::SpeechHypothesis& h, uint32_t overlap) {
@@ -150,7 +165,11 @@ void Reconciler::accept(const pb::SpeechHypothesis& h, uint32_t overlap) {
   }
   auto status = pb::RECONCILIATION_STATUS_DIRECT;
   if (!pending_.empty()) {
-    if (h.first_sample() >= h.first_new_sample()) {
+    const bool beyond_previous_window = !invalid_timing && !fresh.empty() &&
+        std::all_of(fresh.begin(), fresh.end(), [&](const auto& token) {
+          return token.start_us() > end_time_ + tolerance;
+        });
+    if (h.first_sample() >= h.first_new_sample() || beyond_previous_window || fresh.empty()) {
       output(pending_.size(), true, uncertain_ ? pb::RECONCILIATION_STATUS_UNRESOLVED : pb::RECONCILIATION_STATUS_DIRECT);
       uncertain_ = false;
     } else {

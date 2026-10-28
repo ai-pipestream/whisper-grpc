@@ -123,6 +123,30 @@ int main() {
     check(s.reconciliation()==pb::RECONCILIATION_STATUS_DIRECT); text+=s.text();
   }
   check(text==" earlier later");
+  // An empty hypothesis has no competing text; retain the preceding tail.
+  out.clear(); Reconciler no_text([&](auto s){out.push_back(std::move(s));});
+  no_text.accept(window(1,0,0,{{" retained",3300000,3600000}}),16000);
+  const auto retained_id=out.back().segment_id();
+  no_text.accept(window(2,48000,64000,{}),0); no_text.finish();
+  check(out.size()==2 && out.back().final() && out.back().text()==" retained" &&
+        out.back().segment_id()==retained_id && out.back().revision()==2 &&
+        out.back().reconciliation()==pb::RECONCILIATION_STATUS_DIRECT);
+  // SentencePiece strips the first word's space in each independent window.
+  out.clear(); Reconciler word_starts([&](auto s){out.push_back(std::move(s));});
+  auto start_word=window(1,0,0,{{"First",100000,500000}});
+  token=start_word.mutable_segments(0)->mutable_tokens(0);
+  token->set_text("▁First"); token->set_rendered_text("First");
+  token->mutable_parakeet()->set_is_word_start(true);
+  word_starts.accept(start_word,0);
+  auto next_word=window(2,64000,64000,{{"Next",4500000,4900000}});
+  token=next_word.mutable_segments(0)->mutable_tokens(0);
+  token->set_text("▁Next"); token->set_rendered_text("Next");
+  token->mutable_parakeet()->set_is_word_start(true);
+  const auto raw_next=next_word.SerializeAsString();
+  word_starts.accept(next_word,0); word_starts.finish();
+  check(out.size()==2 && out[0].text()+out[1].text()=="First Next" &&
+        out[1].tokens(0).text()=="▁Next" && out[1].tokens(0).rendered_text()==" Next" &&
+        next_word.SerializeAsString()==raw_next);
   std::cout<<"reconciliation cases passed\n";
  } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

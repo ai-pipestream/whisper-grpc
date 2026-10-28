@@ -577,7 +577,7 @@ message TranscriptSegment {
   int64 start_us = 5;
   // Source timeline end, in microseconds.
   int64 end_us = 6;
-  // Recognized or translated text exactly as returned by the engine.
+  // Exact engine text in raw hypotheses; reconciled text in derived revisions.
   string text = 7;
   // Detected or configured source language.
   string source_language = 8;
@@ -627,7 +627,8 @@ message SpeechToken {
   SpeechTokenKind kind = 6;
   // Native Whisper values, preserving confidence and timing diagnostics.
   WhisperTokenMetadata whisper = 7;
-  // Text contribution after native detokenization. Absent means use text bytes.
+  // Native detokenized contribution; derived revisions may restore word spacing.
+  // Absent means use text bytes.
   // May be empty or a partial UTF-8 sequence; concatenate before validation.
   optional bytes rendered_text = 8;
   // Native Parakeet duration, alignment and confidence values.

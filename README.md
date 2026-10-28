@@ -41,7 +41,11 @@ The reconciler keeps a bounded provisional tail and joins overlapping
 lexical tokens using text and source-time evidence. Native vocabulary bytes are
 retained in `SpeechToken.text`; optional `rendered_text` carries the native
 detokenized contribution used for matching and display. Both byte forms count
-against the reconciliation memory bound. It emits stable segment IDs
+against the reconciliation memory bound. Native Parakeet word-start markers
+restore separators in derived text when a new window drops its leading space;
+raw hypotheses and native token bytes remain intact. Empty hypotheses or speech
+entirely beyond the earlier window do not create text conflicts. These rules
+concern alignment, not ASR accuracy. It emits stable segment IDs
 with increasing revisions, preserves competing text as `UNRESOLVED` when a join
 is ambiguous, and stops after validation or delivery failure. Raw hypotheses
 remain separate from these derived revisions. `reconcile_tests` covers repeated
@@ -94,19 +98,17 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 ### Alternative native speech backend qualification
 
-**Known failing release gate:** `parakeet_boundary_reference` checks the same
-reference speech in four-second windows with one-second overlap. With the pinned
-Q8 weights in the host Debug build, source interval 6–10s yields no tokens.
-A fresh model, direct native API calls, and 1s of appended zero samples give
-that result too. FP16 weights from the pinned revision also yield no text for
-this interval. The Debian Release container recognizes text there but fails
-reconciliation. The build-dependent recognition and overlap handling both need
-further investigation. Passing the
-whole-recording Parakeet test does not qualify chunked streaming. The release
-workflow now requires this additional boundary test; it must be fixed before
-publishing. Whisper remains the default backend.
+**Boundary qualification:** `parakeet_boundary_reference` uses four-second
+windows with one-second overlap. After the reconciliation fixes, the Debian
+Release build preserves the exact reference word sequence across all four
+windows. Both host and Debian Debug builds still omit the text in source
+interval 6–10s. Fresh model instances, direct native API calls, 1s of appended
+zero samples, and FP16 weights did not fix the host Debug result. The controlled
+Debian comparison uses the same toolchain and libraries for both build modes;
+the native inference difference remains open. The boundary gate stays required
+for release. Whisper remains the default backend.
 
-Run the failing case with
+Run the boundary case with
 `ctest --test-dir build -R parakeet_boundary_reference --output-on-failure` after configuring
 `MEDIA_TEST_PARAKEET_MODEL`. For native-state isolation, the probe accepts
 `MEDIA_PROBE_FRESH_STATE=1` to recreate the Parakeet model before each window.
