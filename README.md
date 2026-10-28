@@ -94,6 +94,20 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 ### Alternative native speech backend qualification
 
+**Known failing release gate:** `parakeet_boundary_reference` checks the same
+reference speech in four-second windows with one-second overlap. With the pinned
+Q8 weights, the window covering source seconds 6–10 returns no tokens, leaving
+an unresolved overlap. The failure reproduces in a fresh model and with the
+native API alone, including with one second of trailing silence. Passing the
+whole-recording Parakeet test does not qualify chunked streaming. The release
+workflow now requires this additional boundary test; it must be fixed before
+publishing. Whisper remains the default backend.
+
+Run the failing case with
+`ctest --test-dir build -R parakeet_boundary_reference --output-on-failure` after configuring
+`MEDIA_TEST_PARAKEET_MODEL`. For native-state isolation, the probe accepts
+`MEDIA_PROBE_FRESH_STATE=1` to recreate the Parakeet model before each window.
+
 The release workflow gates both native architectures on Parakeet adapter and
 packaged-worker qualification, using checksum-pinned weights. The runtime test
 uses a separate client container, a read-only root filesystem, UID 65532, and
@@ -156,7 +170,7 @@ Each native CI job then fetches revision-pinned, SHA-256-checked tiny English,
 multilingual base, Silero and Parakeet models and runs seven model-backed executables:
 VAD, overlap reconciliation, worker inference, pipeline cancellation, the full
 audio/video speech pipeline, Spanish transcription/English translation, and
-Parakeet transcription. The Spanish test is a functional gate on one attributed
+Parakeet transcription, including the additional overlapping-window gate. The Spanish test is a functional gate on one attributed
 human recording, not a
 broad model accuracy benchmark. To run this qualification locally after the
 native image build:
