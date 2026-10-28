@@ -3,6 +3,7 @@
 #include "worker.h"
 #include <grpcpp/grpcpp.h>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -38,7 +39,8 @@ int main(int argc, char** argv) {
     media::SpeechWorker worker(model); Server worker_server(worker);
     media::SpeechPipelineFactory factory(worker_server.address(), vad);
     media::Registry registry; media::Service ingress(registry, &factory); Server ingress_server(ingress);
-    auto stub = pb::MediaService::NewStub(grpc::CreateChannel(ingress_server.address(), grpc::InsecureChannelCredentials()));
+    const char* external = std::getenv("MEDIA_PIPELINE_TEST_TARGET");
+    auto stub = pb::MediaService::NewStub(grpc::CreateChannel(external ? external : ingress_server.address(), grpc::InsecureChannelCredentials()));
     pb::OpenStream raw_only; auto* raw = raw_only.add_speech();
     raw->set_model_id("test-tiny.en"); raw->set_reconcile_transcript(false);
     factory.resolve(raw_only);
@@ -66,7 +68,13 @@ int main(int argc, char** argv) {
             response.event().opened().speech(0).word_timestamps(), "resolved reconciliation options missing");
       pb::SubscribeRequest live_request; live_request.add_stream_ids(id);
       live_request.add_payload_kinds(pb::PAYLOAD_KIND_TRANSCRIPT);
-      auto live = registry.subscribe(live_request);
+      live_request.mutable_hydration()->set_metadata(true);
+      grpc::ClientContext live_context; live_context.set_deadline(std::chrono::system_clock::now() + 90s);
+      auto live = stub->Subscribe(&live_context, live_request);
+      pb::SubscribeResponse initial;
+      check(live->Read(&initial) && initial.has_snapshot_begin(), "live subscription boundary missing");
+      check(live->Read(&initial) && initial.has_snapshot(), "live subscription metadata missing");
+      check(live->Read(&initial) && initial.has_snapshot_end(), "live subscription registration incomplete");
       std::map<std::string, pb::TranscriptSegment> revisions;
       std::atomic<bool> saw_hypothesis{false}, done{false}, writes_ok{true};
       std::jthread writer([&] {
@@ -117,11 +125,12 @@ int main(int argc, char** argv) {
           if (t.final()) final_text += t.text();
           revisions[t.segment_id()] = t;
           pb::SubscribeResponse delivered;
-          evidence_ok &= live->next(delivered, 1s) && delivered.event().transcript().SerializeAsString()==t.SerializeAsString();
+          evidence_ok &= live->Read(&delivered) && delivered.event().transcript().SerializeAsString()==t.SerializeAsString();
         }
         if (event.has_closed()) closed = event.closed().status_code() == 0 && event.closed().source_sha256() == media::sha256(data);
       }
       done = true; writer.join();
+      live_context.TryCancel(); while (live->Read(&initial)) {} live->Finish();
       const auto status = rpc->Finish();
       if (!status.ok()) std::cerr << "pipeline status: " << status.error_code() << ' ' << status.error_message() << '\n';
       check(status.ok() && writes_ok && closed, "pipeline did not close successfully");

@@ -162,7 +162,9 @@ Decoded PCM can feed speech internally without publishing PCM events; set
 With both model paths configured in CMake, `pipeline_tests` runs real gRPC
 ingress-to-worker tests in fixed and speech-aware modes, holds back the final
 quarter of the upload until a hypothesis arrives, checks original-byte and
-provenance integrity, and checks closed-stream hypothesis hydration.
+provenance integrity, verifies transcript revisions through a separate gRPC
+subscription, and checks closed-stream hypothesis and latest-revision hydration.
+The fixed-overlap case asserts the exact reference word sequence.
 
 To qualify the packaged worker with real inference, run
 `scripts/smoke-worker.sh IMAGE /path/to/ggml-tiny.en.bin /path/to/jfk.wav`
@@ -171,6 +173,14 @@ pinned Whisper source's `samples/` directory. The driver checks native model
 output over gRPC before sending finish, overload and malformed lifecycle
 rejection, and a read-only non-root container with exactly one read-only model
 mount. This is test tooling, not a request-path shell dependency.
+
+To qualify the complete packaged chain, run
+`scripts/smoke-pipeline.sh IMAGE /path/to/ggml-tiny.en.bin /path/to/silero.bin /path/to/jfk.wav`.
+It starts separate ingress and worker containers on an isolated temporary
+network, with read-only roots and model mounts, and runs the same real-model
+pipeline checks against the container endpoint. The driver removes its
+containers and network when it exits. `MEDIA_PIPELINE_TEST_TARGET=host:port`
+can target an existing matching deployment directly from `build/pipeline_tests`.
 
 To exercise the image using the same live wire tests (requires `grpcurl` and
 the locally built `build/media_tests`):

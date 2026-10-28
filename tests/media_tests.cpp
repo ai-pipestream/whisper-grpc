@@ -485,17 +485,13 @@ void wire_live_decoding() {
 
 int main() {
   try {
-    uuid_selection_and_future_streams();
-    snapshot_live_atomicity();
-    transcript_revisions();
-    closed_stream_reclamation();
-    replay_eviction_and_filtering();
-    subscriber_backpressure_isolation();
-    bounded_registry_and_capabilities();
-    wire_streaming_and_integrity();
-    malformed_wire_input();
-    wire_live_decoding();
-    std::cout << "8 media protocol tests passed\n";
+    const auto cases = {uuid_selection_and_future_streams, snapshot_live_atomicity,
+                        transcript_revisions, closed_stream_reclamation,
+                        replay_eviction_and_filtering, subscriber_backpressure_isolation,
+                        bounded_registry_and_capabilities, wire_streaming_and_integrity,
+                        malformed_wire_input, wire_live_decoding};
+    for (auto test : cases) test();
+    std::cout << cases.size() << " media protocol tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;
