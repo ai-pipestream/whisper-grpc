@@ -96,9 +96,12 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 **Known failing release gate:** `parakeet_boundary_reference` checks the same
 reference speech in four-second windows with one-second overlap. With the pinned
-Q8 weights, the window covering source seconds 6–10 returns no tokens, leaving
-an unresolved overlap. The failure reproduces in a fresh model and with the
-native API alone, including with one second of trailing silence. Passing the
+Q8 weights in the host Debug build, source interval 6–10s yields no tokens.
+A fresh model, direct native API calls, and 1s of appended zero samples give
+that result too. FP16 weights from the pinned revision also yield no text for
+this interval. The Debian Release container recognizes text there but fails
+reconciliation. The build-dependent recognition and overlap handling both need
+further investigation. Passing the
 whole-recording Parakeet test does not qualify chunked streaming. The release
 workflow now requires this additional boundary test; it must be fixed before
 publishing. Whisper remains the default backend.
