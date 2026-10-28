@@ -700,6 +700,9 @@ message GetModelInfoResponse {
   uint32 max_concurrent_inferences = 7;
   // Configured CPU threads per inference.
   uint32 inference_threads = 8;
+  // Maximum wait for each incoming message, including open; excludes inference.
+  // Expiry cancels the RPC and releases its stream slot.
+  uint32 input_idle_timeout_ms = 9;
 }
 
 // One worker input message; audio windows already contain any intended overlap.

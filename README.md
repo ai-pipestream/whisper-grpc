@@ -147,6 +147,15 @@ window and concurrency limits, and supported tasks. English-only weights
 advertise transcription only; multilingual weights also advertise translation
 to English. Discovery does not allocate a stream or run inference and remains
 available when all worker stream slots are occupied.
+
+The worker cancels a stream after 120 seconds waiting for an incoming message,
+including its initial opening message. Set `WHISPER_WORKER_INPUT_IDLE_SECONDS`
+to an integer from 1 to 3600 to change this policy. The timer runs only while
+waiting for input, so active inference is excluded. An idle expiry cancels the
+RPC and releases its stream slot; it is not a successful stream close. The
+resolved timeout is exposed by `GetModelInfo.input_idle_timeout_ms`. For live
+sources, choose a timeout longer than the maximum time needed to accumulate
+and deliver an inference window, including expected feed stalls.
 The current transport is plaintext and unauthenticated: keep it on loopback
 or behind an authenticated private gateway. Global subscriptions see all
 streams in this server, not other server processes.

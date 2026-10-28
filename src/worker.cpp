@@ -1,14 +1,39 @@
 #include "worker.h"
 #include <bit>
+#include <condition_variable>
 #include <limits>
+#include <mutex>
+#include <thread>
 
 namespace media {
 namespace {
 void require(bool ok, const char* reason) {
   if (!ok) throw Failure(grpc::StatusCode::INVALID_ARGUMENT, reason);
 }
+// The watchdog exists only during a blocking read, never during inference or
+// response construction. At most one watchdog per admitted worker stream.
+class ReadDeadline {
+ public:
+  ReadDeadline(grpc::ServerContext& context, std::chrono::milliseconds timeout)
+      : thread_([this, &context, timeout] {
+          std::unique_lock lock(mutex_);
+          if (!changed_.wait_for(lock, timeout, [&] { return done_; })) context.TryCancel();
+        }) {}
+  ~ReadDeadline() {
+    { std::lock_guard lock(mutex_); done_ = true; }
+    changed_.notify_one();
+    thread_.join();
+  }
+ private:
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  bool done_ = false;
+  std::thread thread_;
+};
 }
-SpeechWorker::SpeechWorker(SpeechModel& model, std::string machine_id) : model_(model) {
+SpeechWorker::SpeechWorker(SpeechModel& model, std::string machine_id, std::chrono::milliseconds input_idle_timeout)
+    : model_(model), input_idle_timeout_(input_idle_timeout) {
+  require(input_idle_timeout.count() > 0 && input_idle_timeout <= std::chrono::hours(1), "invalid worker input idle timeout");
   if (machine_id.empty()) machine_id = uuid();
   require(valid_uuid(machine_id), "invalid worker machine UUID");
   producer_.set_machine_id(machine_id);
@@ -30,6 +55,7 @@ grpc::Status SpeechWorker::GetModelInfo(grpc::ServerContext*, const pb::GetModel
   info->set_max_streams(max_streams);
   info->set_max_concurrent_inferences(1);
   info->set_inference_threads(model_.threads());
+  info->set_input_idle_timeout_ms(input_idle_timeout_.count());
   return grpc::Status::OK;
 }
 grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
@@ -40,8 +66,12 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
   }
   struct Release { std::atomic<unsigned>& streams; ~Release() { streams.fetch_sub(1); } } release{streams_};
   try {
+    auto read = [&](pb::TranscribeRequest* request) {
+      ReadDeadline deadline(*context, input_idle_timeout_);
+      return wire->Read(request);
+    };
     pb::TranscribeRequest request;
-    require(wire->Read(&request) && request.has_open(), "first worker message must open a track");
+    require(read(&request) && request.has_open(), "first worker message must open a track");
     auto accepted = request.open();
     require(valid_uuid(accepted.stream_id()), "invalid source stream UUID");
     require(!accepted.options().has_windowing(), "worker accepts pre-cut windows, not a windowing policy");
@@ -53,13 +83,14 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     *opened->mutable_accepted() = accepted;
     *opened->mutable_producer() = producer_;
     opened->mutable_producer()->set_configuration_sha256(
-        sha256(accepted.options().SerializeAsString() + ":threads=" + std::to_string(model_.threads())));
+        sha256(accepted.options().SerializeAsString() + ":threads=" + std::to_string(model_.threads()) +
+               ":input_idle_ms=" + std::to_string(input_idle_timeout_.count())));
     opened->set_max_window_samples(max_window_samples);
     const auto producer = opened->producer();
     if (!wire->Write(response)) return {grpc::StatusCode::CANCELLED, "worker handshake disconnected"};
     uint64_t count = 0, end = 0;
     bool after_discontinuity = false, after_end = false;
-    while (wire->Read(&request)) {
+    while (read(&request)) {
       if (request.has_finish()) {
         require(request.finish().window_count() == count, "worker finish count mismatch");
         response.Clear(); response.mutable_closed()->set_window_count(count);

@@ -47,6 +47,30 @@ int main(int argc, char** argv) {
     std::ifstream file(argv[1], std::ios::binary); check(file.good(), "cancellation model missing");
     const std::string weights{std::istreambuf_iterator<char>(file), {}};
     media::SpeechModel model(weights, "test-tiny.en", 4);
+    {
+      media::SpeechWorker expiring(model, {}, 100ms); Server server(expiring);
+      auto stub = pb::SpeechWorkerService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
+      grpc::ClientContext info_context; info_context.set_deadline(std::chrono::system_clock::now()+5s);
+      pb::GetModelInfoResponse info;
+      check(stub->GetModelInfo(&info_context, {}, &info).ok() && info.input_idle_timeout_ms()==100,
+            "worker idle policy absent from discovery");
+      // Exceed lifetime slot capacity: both pre-open and post-handshake expiry
+      // must release admission, not merely make clients observe cancellation.
+      for (int i=0; i<34; ++i) {
+        grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now()+5s);
+        auto rpc = stub->Transcribe(&context);
+        pb::TranscribeResponse response;
+        if (i % 2) {
+          pb::TranscribeRequest request; request.mutable_open()->set_stream_id(media::uuid());
+          request.mutable_open()->mutable_options()->set_model_id("test-tiny.en");
+          check(rpc->Write(request) && rpc->Read(&response) && response.has_opened(), "expired worker slot not reusable");
+        }
+        check(!rpc->Read(&response), "idle worker returned an unexpected response");
+        check(rpc->Finish().error_code()==grpc::StatusCode::CANCELLED,
+              "idle RPC did not expire before the client deadline");
+      }
+      std::cout << "Pre-open and post-handshake idle expiry reclaimed worker slots\n";
+    }
     media::SpeechWorker worker(model); Server worker_server(worker);
     auto worker_stub = pb::SpeechWorkerService::NewStub(grpc::CreateChannel(worker_server.address(), grpc::InsecureChannelCredentials()));
     std::vector<std::unique_ptr<Idle>> held;

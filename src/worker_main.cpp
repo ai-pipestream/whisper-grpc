@@ -14,6 +14,13 @@ int main() {
     const char* id = std::getenv("WHISPER_MODEL_ID");
     if (!path || !id || !*id) throw std::runtime_error("WHISPER_MODEL_PATH and WHISPER_MODEL_ID are required");
     int threads = 4;
+    int idle_seconds = 120;
+    if (const char* raw = std::getenv("WHISPER_WORKER_INPUT_IDLE_SECONDS")) {
+      const std::string_view text(raw);
+      const auto result = std::from_chars(text.data(), text.data() + text.size(), idle_seconds);
+      if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || idle_seconds < 1 || idle_seconds > 3600)
+        throw std::runtime_error("WHISPER_WORKER_INPUT_IDLE_SECONDS must be an integer from 1 to 3600");
+    }
     if (const char* raw = std::getenv("WHISPER_THREADS")) {
       const std::string_view text(raw);
       const auto result = std::from_chars(text.data(), text.data() + text.size(), threads);
@@ -30,7 +37,7 @@ int main() {
     media::SpeechModel model(weights, id, threads);
     std::string().swap(weights);
     const char* machine = std::getenv("WHISPER_MACHINE_ID");
-    media::SpeechWorker service(model, machine ? machine : "");
+    media::SpeechWorker service(model, machine ? machine : "", std::chrono::seconds(idle_seconds));
     const char* address = std::getenv("WHISPER_WORKER_LISTEN");
     if (!address) address = "127.0.0.1:50073";
     grpc::EnableDefaultHealthCheckService(true);
