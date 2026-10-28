@@ -7,15 +7,17 @@ The C++ server implements direct byte-stream ingress, UUID subscriptions,
 bounded in-memory hydration, checksums, lifecycle events and native FFmpeg
 demux/audio decoding. HTTP input and speech requests still fail explicitly
 with UNIMPLEMENTED. A separate native Whisper worker is implemented; ingress
-routing to it and real VAD integration remain pending.
+routing to it and service-level VAD integration remain pending.
 The media path calls native libraries with no JSON bridge, shell-based media
 processing, or request-file writes.
 
 The standalone speech-window engine is implemented and tested for fixed cuts,
 confirmed pauses, forced overlap, bounded continuous speech, final flush and
-timeline discontinuities. It consumes caller-supplied VAD decisions; it is not
-yet connected to a real VAD model or exposed through the service. This is not
-evidence of speech-recognition accuracy or reliable real-world pause detection.
+timeline discontinuities. A native Silero adapter now supplies real VAD
+probabilities, with deterministic 512-sample framing independent of transport
+chunks. Their combined tests verify sample coverage and pause selection on
+reference speech and silence. They are not yet exposed through the media
+service; this does not establish accuracy on arbitrary recordings or music.
 
 The native CPU Whisper adapter is built by default (`MEDIA_BUILD_SPEECH=OFF`
 omits it). Its source is pinned by commit and archive checksum. It loads model
@@ -32,6 +34,22 @@ JFK WAV fixture from the pinned upstream source, checks recognizable reference
 phrases and native metadata, and tests cancellation and model-ID rejection.
 The test is not registered without a model path; ordinary test success does
 not imply model qualification. Model assets are never downloaded by a request.
+
+Real VAD qualification additionally uses `-DMEDIA_TEST_VAD_MODEL=/path/to/model.bin`
+and `ctest --test-dir build -R vad_tests --output-on-failure`. The currently
+qualified weights are [Silero v5.1.2 in GGML format](https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v5.1.2.bin),
+SHA-256 `29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf`.
+Other weights are rejected until their input framing is qualified. The adapter
+loads weights through an in-memory native loader, maintains state per track,
+and emits only real samples, excluding final model padding. Detection remains
+probabilistic. Tests cover reference speech at original and attenuated volume,
+silence, invalid PCM, transport-framing invariance,
+pause-based windowing and discontinuities, not a broad acoustic benchmark.
+
+`cmake/PatchWhisperVad.cmake` fixes the pinned upstream compute-error path to
+return failure instead of success with an untouched probability. Configuration
+fails if the exact pinned source no longer matches the patch. This patch is
+included in the service build fingerprint.
 
 See [DESIGN.md](DESIGN.md) for the required behavior and acceptance tests,
 and [media.proto](proto/ai/pipestream/media/v1/media.proto) for the initial
