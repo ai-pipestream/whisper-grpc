@@ -65,6 +65,7 @@ class Registry {
   explicit Registry(Limits limits = {}, std::string machine_id = {});
   pb::StreamEvent open(const pb::OpenStream& request);
   pb::StreamEvent source(const std::string& id, const pb::SourceChunk& chunk);
+  pb::StreamEvent derived(const std::string& id, pb::StreamEvent event, const std::string& library_version);
   pb::StreamEvent close(const std::string& id, const pb::StreamClosed& closed);
   std::shared_ptr<Subscription> subscribe(const pb::SubscribeRequest& request);
   const Limits& limits() const { return limits_; }
@@ -72,6 +73,7 @@ class Registry {
 
  private:
   struct Stream {
+    pb::Producer producer;
     pb::StreamSnapshot snapshot;
     std::deque<pb::StreamEvent> history;
     size_t history_bytes = 0;

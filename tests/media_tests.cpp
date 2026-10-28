@@ -1,4 +1,5 @@
 #include "service.h"
+#include "media_fixture.h"
 
 #include <grpcpp/grpcpp.h>
 
@@ -159,6 +160,22 @@ void subscriber_backpressure_isolation() {
 }
 
 void bounded_registry_and_capabilities() {
+  // Provenance identifies processing settings, independently of stream identity.
+  media::Registry provenance;
+  const auto relay = provenance.open(open_request());
+  const auto another_relay = provenance.open(open_request());
+  auto decode_request = open_request();
+  decode_request.mutable_decode()->set_emit_audio(true);
+  const auto decoded = provenance.open(decode_request);
+  check(relay.producer().configuration_sha256() == another_relay.producer().configuration_sha256(),
+        "stream identity changed processing digest");
+  check(relay.producer().configuration_sha256() != decoded.producer().configuration_sha256(),
+        "decode options absent from processing digest");
+  pb::StreamEvent audio;
+  audio.mutable_audio();
+  const auto derived = provenance.derived(decoded.cursor().stream_id(), std::move(audio), "test-decoder/1");
+  check(derived.producer().configuration_sha256() == decoded.producer().configuration_sha256(),
+        "derived event lost processing digest");
   media::Limits limits;
   limits.max_subscribers = 1;
   limits.max_streams = 1;
@@ -290,6 +307,82 @@ void malformed_wire_input() {
   }
 }
 
+void wire_live_decoding() {
+  RunningServer running;
+  // FFmpeg probes 64 KiB of PCM WAV for embedded SPDIF during header parsing.
+  // Use six seconds so the first half includes that probe, while holding back
+  // three full seconds until actual PCM arrives. NUT has no such startup probe.
+  for (const auto& fixture : {std::pair{wav_fixture(16000, 1, 6), uint64_t{96000}},
+                              std::pair{nut_fixture(), uint64_t{48000}}}) {
+    const auto& data = fixture.first;
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 5s);
+    auto stream = running.client->Ingest(&context);
+    pb::IngestRequest request;
+    *request.mutable_open() = open_request();
+    request.mutable_open()->mutable_decode()->set_emit_audio(true);
+    request.mutable_open()->mutable_decode()->set_emit_packets(true);
+    check(stream->Write(request), "decode open failed");
+    pb::IngestResponse response;
+    check(stream->Read(&response) && response.event().has_opened(), "decode handshake absent");
+    check(response.event().opened().decode().emit_audio(), "decode options not acknowledged");
+    const auto id = response.event().cursor().stream_id();
+    const size_t split = data.size() / 2;
+    request.Clear();
+    *request.mutable_chunk() = chunk(1, data.substr(0, split));
+    check(stream->Write(request), "decode first upload failed");
+    uint64_t audio_samples = 0;
+    std::string reconstructed;
+    bool saw_audio = false, saw_metadata = false, saw_packet = false, closed = false;
+    auto observe = [&](const pb::StreamEvent& event) {
+      if (event.has_source()) reconstructed += event.source().data();
+      if (event.has_audio()) {
+        saw_audio = true;
+        check(event.audio().first_sample() == audio_samples, "wire audio sample sequence gap");
+        audio_samples += event.audio().pcm_f32le().size() / 4;
+        check(event.producer().library_version().find("libavcodec/") != std::string::npos, "decoder provenance absent");
+      }
+      saw_metadata |= event.has_media_info();
+      saw_packet |= event.has_packet();
+      if (event.has_closed()) {
+        closed = true;
+        check(event.closed().status_code() == 0, "decode terminal reported failure");
+        check(event.closed().source_sha256() == media::sha256(data), "decode lost original source hash");
+      }
+    };
+    // Hold the second half until decoded audio is observed, not just byte echo.
+    while (!saw_audio && stream->Read(&response)) observe(response.event());
+    check(saw_audio, "decoded audio did not arrive during upload");
+    request.Clear();
+    *request.mutable_chunk() = chunk(2, data.substr(split));
+    request.mutable_chunk()->set_byte_offset(split);
+    check(stream->Write(request), "decode second upload failed");
+    request.Clear();
+    request.mutable_finish()->set_chunk_count(2);
+    request.mutable_finish()->set_byte_count(data.size());
+    check(stream->Write(request), "decode finish failed");
+    stream->WritesDone();
+    while (stream->Read(&response)) observe(response.event());
+    check(stream->Finish().ok(), "wire decode failed");
+    check(closed && saw_metadata && saw_packet && audio_samples == fixture.second, "wire decode missing output");
+    check(reconstructed == data, "decoded path changed original source bytes");
+
+    grpc::ClientContext hydration_context;
+    hydration_context.set_deadline(std::chrono::system_clock::now() + 5s);
+    pb::SubscribeRequest subscription;
+    subscription.add_stream_ids(id);
+    subscription.mutable_hydration()->set_metadata(true);
+    auto listener = running.client->Subscribe(&hydration_context, subscription);
+    pb::SubscribeResponse item;
+    check(listener->Read(&item) && item.has_snapshot_begin(), "media hydration missing begin");
+    check(listener->Read(&item) && item.has_snapshot(), "media hydration missing state");
+    check(item.snapshot().has_media_info() && item.snapshot().producers_size() == 2, "media hydration missing metadata or producer");
+    hydration_context.TryCancel();
+    while (listener->Read(&item)) {}
+    check(listener->Finish().error_code() == grpc::StatusCode::CANCELLED, "media hydration cancel failed");
+  }
+}
+
 int main() {
   try {
     uuid_selection_and_future_streams();
@@ -299,7 +392,8 @@ int main() {
     bounded_registry_and_capabilities();
     wire_streaming_and_integrity();
     malformed_wire_input();
-    std::cout << "7 media protocol tests passed\n";
+    wire_live_decoding();
+    std::cout << "8 media protocol tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

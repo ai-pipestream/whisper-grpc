@@ -1,8 +1,10 @@
 #include "service.h"
+#include "decoder.h"
 
 #include <openssl/evp.h>
 
 #include <array>
+#include <cstring>
 #include <limits>
 
 namespace media {
@@ -47,13 +49,19 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
       if (!wire->Read(&request) || !request.has_open())
         throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "first message must open a stream");
       const auto opened = registry_.open(request.open());
+      const auto options = request.open().decode();
+      const bool decoding = request.open().has_decode();
       id = opened.cursor().stream_id();
       send(opened);
-      while (wire->Read(&request)) {
+      std::string buffered;
+      size_t offset = 0;
+      auto next_chunk = [&]() -> bool {
+        if (explicit_finish) return false;
+        if (!wire->Read(&request)) throw Failure(grpc::StatusCode::CANCELLED, "input ended without FinishStream");
         if (request.has_finish()) {
           finish = request.finish();
           explicit_finish = true;
-          break;
+          return false;
         }
         if (!request.has_chunk()) throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "expected a source chunk or finish");
         auto chunk = request.chunk();
@@ -72,7 +80,25 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
         ++count;
         bytes += chunk.data().size();
         send(registry_.source(id, chunk));
+        buffered = std::move(*chunk.mutable_data());
+        offset = 0;
+        return true;
+      };
+      if (decoding) {
+        const auto library_version = decoder_version();
+        decode_media([&](uint8_t* output, int capacity) -> int {
+          if (offset == buffered.size() && !next_chunk()) return 0;
+          const auto size = std::min(buffered.size() - offset, static_cast<size_t>(capacity));
+          std::memcpy(output, buffered.data() + offset, size);
+          offset += size;
+          return static_cast<int>(size);
+        }, [&](pb::StreamEvent event) {
+          send(registry_.derived(id, std::move(event), library_version));
+        }, [&] { return context->IsCancelled(); }, options);
       }
+      // Some finite formats stop at their declared data length. Preserve any
+      // remaining original bytes and still require the explicit input trailer.
+      while (next_chunk()) {}
       if (!explicit_finish) throw Failure(grpc::StatusCode::CANCELLED, "input ended without FinishStream");
       if (finish.chunk_count() != count || finish.byte_count() != bytes)
         throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "finish accounting mismatch");

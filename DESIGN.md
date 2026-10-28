@@ -1,10 +1,11 @@
 # Live media and speech services
 
-Status: transport implementation in progress. Direct ingestion, subscriptions,
-bounded hydration and source checksums have a C++ implementation and loopback
-gRPC tests. The sections below describe the full target, including work not yet
-implemented. HTTP input, decoding, transcription, worker chaining and
-speech-aware chunking remain pending; see README.md for current limits.
+Status: media implementation in progress. Direct ingestion, subscriptions,
+bounded hydration, source checksums and native FFmpeg demux/audio decoding have
+a C++ implementation and loopback gRPC tests. The sections below describe the
+full target, including work not yet implemented. HTTP input, transcription,
+worker chaining and speech-aware chunking remain pending; see README.md for
+current format coverage and limits.
 
 ## Required behavior
 
@@ -23,8 +24,9 @@ Two independent processes keep decoding and model scheduling separate:
 
 The ingress stream can return original media, speech output, or both. Output
 filters must not silently turn off processing requested by other subscribers.
-The worker protocol and container/track/packet descriptors still need to be
-added to the initial subscription contract before it is implementation-ready.
+The subscription contract includes initial container/track/packet descriptors.
+The worker protocol, transcript hydration and full native metadata coverage
+still need implementation and validation.
 
 ## Speech-aware chunking and optional overlap
 

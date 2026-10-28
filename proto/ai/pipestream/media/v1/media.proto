@@ -51,6 +51,10 @@ enum PayloadKind {
   PAYLOAD_KIND_AUDIO = 2;
   // Speech transcription or English translation results.
   PAYLOAD_KIND_TRANSCRIPT = 3;
+  // Container and track descriptions, including later metadata updates.
+  PAYLOAD_KIND_MEDIA_INFO = 4;
+  // Demuxed compressed packets, including video, audio and subtitle tracks.
+  PAYLOAD_KIND_PACKET = 5;
 }
 
 // Bounded hydration policy; this does not imply durable storage.
@@ -118,6 +122,8 @@ message StreamSnapshot {
   repeated TranscriptSegment transcripts = 6;
   // True if older result state was evicted; transcripts is not a complete history.
   bool result_state_truncated = 7;
+  // Most recently observed container and track descriptions.
+  MediaInfo media_info = 8;
 }
 
 // Initial input declaration.
@@ -133,6 +139,18 @@ message OpenStream {
   }
   // Requested downstream processing; empty means lossless source relay only.
   repeated SpeechOptions speech = 4;
+  // Optional native demux/decode; absent means original-byte relay only.
+  DecodeOptions decode = 5;
+}
+
+// Native media processing to perform alongside byte-preserving relay.
+message DecodeOptions {
+  // Publish mono 16 kHz float32 PCM for speech workers.
+  bool emit_audio = 1;
+  // Publish demuxed packets for all tracks, without transcoding video.
+  bool emit_packets = 2;
+  // Audio tracks to decode by container index. Empty selects all audio tracks.
+  repeated uint32 audio_track_ids = 3;
 }
 
 // Direct gRPC media upload.
@@ -291,6 +309,10 @@ message StreamEvent {
     TranscriptSegment transcript = 7;
     // Exactly one terminal event on normal protocol completion or processing failure.
     StreamClosed closed = 8;
+    // Container and track metadata as discovered by the native demuxer.
+    MediaInfo media_info = 9;
+    // Compressed packet fragment; original source bytes remain authoritative.
+    EncodedPacket packet = 10;
   }
 }
 
@@ -304,6 +326,140 @@ message StreamOpened {
   uint64 retention_bytes = 3;
   // Resolved, accepted speech tasks.
   repeated SpeechOptions speech = 4;
+  // Accepted native processing options, absent for byte relay only.
+  DecodeOptions decode = 5;
+}
+
+// A metadata entry from a native dictionary; bytes preserve non-UTF-8 values.
+message NativeMetadata {
+  // Original key bytes.
+  bytes key = 1;
+  // Original value bytes.
+  bytes value = 2;
+}
+
+// Native side data, retaining its numeric type and raw payload.
+message SideData {
+  // Native library's type identifier, interpreted using producer library_version.
+  int32 native_type = 1;
+  // Library-provided type name, empty if unknown.
+  string type_name = 2;
+  // Exact side-data bytes.
+  bytes data = 3;
+}
+
+// Integer media time base; timestamps are ticks multiplied by this ratio.
+message Rational {
+  // Signed numerator.
+  int32 numerator = 1;
+  // Nonzero denominator.
+  int32 denominator = 2;
+}
+
+// Native track category, distinct from the codec used for its packets.
+enum TrackKind {
+  // Unknown or unsupported native category; native_type still preserves it.
+  TRACK_KIND_UNSPECIFIED = 0;
+  // Audio track.
+  TRACK_KIND_AUDIO = 1;
+  // Video track.
+  TRACK_KIND_VIDEO = 2;
+  // Subtitle track.
+  TRACK_KIND_SUBTITLE = 3;
+  // Timed data track.
+  TRACK_KIND_DATA = 4;
+  // Container attachment.
+  TRACK_KIND_ATTACHMENT = 5;
+}
+
+// Current native description of one track; source bytes preserve unexposed fields.
+message TrackInfo {
+  // Zero-based container track index.
+  uint32 track_id = 1;
+  // Native track identifier, which need not equal its zero-based index.
+  int32 native_id = 2;
+  // Track category.
+  TrackKind kind = 3;
+  // Original native media type identifier.
+  int32 native_type = 4;
+  // Codec identifier in the producing library version.
+  int32 codec_id = 5;
+  // Library-provided codec name.
+  string codec_name = 6;
+  // Container-specific codec tag.
+  uint32 codec_tag = 7;
+  // Codec initialization bytes, including information needed to decode packets.
+  bytes codec_extradata = 8;
+  // Time base for native timestamps.
+  Rational time_base = 9;
+  // First timestamp if known, in native ticks.
+  optional int64 start_time = 10;
+  // Track duration if known, in native ticks.
+  optional int64 duration = 11;
+  // Original metadata entries.
+  repeated NativeMetadata metadata = 12;
+  // Source audio sample rate, zero when not yet known or not audio.
+  uint32 sample_rate = 13;
+  // Source channel count, zero when not yet known or not audio.
+  uint32 channels = 14;
+  // Source pixel width, zero when not yet known or not video.
+  uint32 width = 15;
+  // Source pixel height, zero when not yet known or not video.
+  uint32 height = 16;
+  // Native track disposition bitmask, retained without interpretation.
+  uint32 disposition_flags = 17;
+  // Bitrate reported by the demuxer, zero when unknown.
+  int64 bit_rate = 18;
+  // Profile reported by the codec, including its native unknown sentinel.
+  int32 profile = 19;
+  // Level reported by the codec, including its native unknown sentinel.
+  int32 level = 20;
+}
+
+// Native container facts. Updated descriptions supersede prior descriptions.
+message MediaInfo {
+  // Demuxer name identifying the parsed container family.
+  string container_name = 1;
+  // Human-readable library-provided format description.
+  string container_description = 2;
+  // Source timeline origin in microseconds, when known.
+  optional int64 start_time_us = 3;
+  // Container duration in microseconds, when known.
+  optional int64 duration_us = 4;
+  // Original container metadata entries.
+  repeated NativeMetadata metadata = 5;
+  // All tracks discovered so far, including non-audio tracks.
+  repeated TrackInfo tracks = 6;
+}
+
+// One bounded fragment of a demuxed packet; fragments are contiguous and ordered.
+message EncodedPacket {
+  // Contiguous packet number across this input, beginning at one.
+  uint64 packet_number = 1;
+  // Container track index.
+  uint32 track_id = 2;
+  // Offset of this fragment within the packet payload.
+  uint64 fragment_offset = 3;
+  // Total unfragmented packet payload length; zero permits side-data-only packets.
+  uint64 packet_bytes = 4;
+  // Exact bytes of this packet fragment.
+  bytes data = 5;
+  // Original presentation timestamp when available.
+  optional int64 pts = 6;
+  // Original decode timestamp when available.
+  optional int64 dts = 7;
+  // Original packet duration in native ticks.
+  int64 duration = 8;
+  // Time base used by pts, dts and duration.
+  Rational time_base = 9;
+  // Original packet flags from the producing native library.
+  uint32 native_flags = 10;
+  // Whether the native demuxer marked this packet as a keyframe.
+  bool keyframe = 11;
+  // Original source byte position when known; omitted if the demuxer cannot report it.
+  optional int64 source_byte_position = 12;
+  // Native side data, attached only to the first fragment.
+  repeated SideData side_data = 13;
 }
 
 // Sample-aligned audio data; the original source is never replaced by this projection.
