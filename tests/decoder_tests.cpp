@@ -127,6 +127,44 @@ void compressed_video_and_audio() {
   verify(metadata && packets==30 && samples==48000, "Matroska track or payload missing");
 }
 
+void fragmented_mp4() {
+  const auto bytes = fragmented_mp4_fixture();
+  const auto result = decode(bytes, all());
+  verify(result.read_at_first_audio > 0 && result.read_at_first_audio < bytes.size()/2,
+         "fragmented MP4 did not decode before the second half");
+  bool video = false, audio = false;
+  uint64_t samples = 0; size_t packets = 0; double energy = 0;
+  int64_t first_pts = 0;
+  for (const auto& event : result.events) {
+    if (event.has_media_info()) for (const auto& track : event.media_info().tracks()) {
+      if (track.kind()==pb::TRACK_KIND_VIDEO)
+        video = track.codec_name()=="h264" && track.width()==64 && track.height()==64 && !track.codec_extradata().empty();
+      if (track.kind()==pb::TRACK_KIND_AUDIO)
+        audio = track.codec_name()=="aac" && track.sample_rate()==48000 && !track.codec_extradata().empty();
+    }
+    if (event.has_packet() && event.packet().track_id()==0) {
+      verify(event.packet().has_pts() && event.packet().has_dts() && !event.packet().data().empty(),
+             "H.264 packet missing payload or timing");
+      const auto& packet = event.packet();
+      if (!packets) first_pts = packet.pts();
+      verify(packet.dts()==packet.pts() &&
+             (packet.pts()-first_pts)*packet.time_base().numerator()*10 ==
+             static_cast<int64_t>(packets)*packet.time_base().denominator(), "H.264 frame timing changed");
+      ++packets;
+    }
+    if (event.has_audio()) {
+      verify(event.audio().first_sample()==samples, "AAC output has a sample gap");
+      const auto& pcm = event.audio().pcm_f32le();
+      for (size_t i=0; i<pcm.size(); i+=4) { const auto v=sample(pcm,i); energy+=v*v; }
+      samples += pcm.size()/4;
+    }
+  }
+  // Six seconds plus bounded AAC frame padding/encoder delay at 16 kHz.
+  verify(video && audio && packets==60 && samples>=96000 && samples<=97024,
+         "fragmented MP4 lost tracks, frames or audio duration");
+  verify(energy/samples > 0.001 && energy/samples < 0.02, "AAC tone decoded as silence or corrupt audio");
+}
+
 void malformed_and_cancelled() {
   bool failed = false;
   try { decode("not a media container", all()); }
@@ -179,9 +217,10 @@ int main() {
     resample_stereo();
     video_and_audio();
     compressed_video_and_audio();
+    fragmented_mp4();
     malformed_and_cancelled();
     packet_fragmentation();
-    std::cout << "6 native media tests passed\n";
+    std::cout << "7 native media tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

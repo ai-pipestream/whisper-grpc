@@ -462,7 +462,8 @@ void wire_live_decoding() {
   // three full seconds until actual PCM arrives. NUT has no such startup probe.
   for (const auto& fixture : {std::pair{wav_fixture(16000, 1, 6), uint64_t{96000}},
                               std::pair{nut_fixture(), uint64_t{48000}},
-                              std::pair{matroska_fixture().bytes, uint64_t{48000}}}) {
+                              std::pair{matroska_fixture().bytes, uint64_t{48000}},
+                              std::pair{fragmented_mp4_fixture(), uint64_t{0}}}) {
     const auto& data = fixture.first;
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + 5s);
@@ -513,7 +514,10 @@ void wire_live_decoding() {
     stream->WritesDone();
     while (stream->Read(&response)) observe(response.event());
     check(stream->Finish().ok(), "wire decode failed");
-    check(closed && saw_metadata && saw_packet && audio_samples == fixture.second, "wire decode missing output");
+    // AAC adds bounded frame padding/encoder delay; PCM fixtures remain exact.
+    const bool duration_ok = fixture.second ? audio_samples == fixture.second :
+        audio_samples >= 96000 && audio_samples <= 97024;
+    check(closed && saw_metadata && saw_packet && duration_ok, "wire decode missing output");
     check(reconstructed == data, "decoded path changed original source bytes");
 
     grpc::ClientContext hydration_context;

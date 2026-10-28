@@ -8,6 +8,7 @@ extern "C" {
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
@@ -216,4 +217,101 @@ VideoFixture matroska_fixture(std::string_view pcm16) {
   if (mux.failure) std::rethrow_exception(mux.failure);
   result.bytes = std::move(mux.bytes);
   return result;
+}
+
+std::string fragmented_mp4_fixture() {
+  Mux mux;
+  struct Encoder {
+    AVCodecContext* codec = nullptr;
+    AVFrame* frame = nullptr;
+    ~Encoder() { av_frame_free(&frame); avcodec_free_context(&codec); }
+  } video, audio;
+  const auto* h264 = avcodec_find_encoder_by_name("libx264");
+  const auto* aac = avcodec_find_encoder(AV_CODEC_ID_AAC);
+  if (!h264 || !aac) throw std::runtime_error("H.264/AAC fixture encoders unavailable");
+  video.codec = avcodec_alloc_context3(h264); audio.codec = avcodec_alloc_context3(aac);
+  video.frame = av_frame_alloc(); audio.frame = av_frame_alloc();
+  if (!video.codec || !audio.codec || !video.frame || !audio.frame) throw std::bad_alloc();
+  video.codec->width = video.codec->height = 64;
+  video.codec->pix_fmt = AV_PIX_FMT_YUV420P;
+  video.codec->time_base = {1, 10};
+  video.codec->gop_size = 5; video.codec->max_b_frames = 0;
+  video.codec->thread_count = 1; video.codec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+  AVDictionary* options = nullptr;
+  av_dict_set(&options, "preset", "ultrafast", 0);
+  av_dict_set(&options, "tune", "zerolatency", 0);
+  const auto opened = avcodec_open2(video.codec, h264, &options);
+  av_dict_free(&options); require(opened);
+  audio.codec->sample_rate = 48000; audio.codec->time_base = {1, 48000};
+  audio.codec->sample_fmt = AV_SAMPLE_FMT_FLTP; audio.codec->bit_rate = 64000;
+  audio.codec->thread_count = 1; audio.codec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+  av_channel_layout_default(&audio.codec->ch_layout, 1);
+  require(avcodec_open2(audio.codec, aac, nullptr));
+  video.frame->width = video.frame->height = 64; video.frame->format = video.codec->pix_fmt;
+  require(av_frame_get_buffer(video.frame, 32));
+  audio.frame->format = audio.codec->sample_fmt; audio.frame->sample_rate = 48000;
+  audio.frame->nb_samples = audio.codec->frame_size;
+  require(av_channel_layout_copy(&audio.frame->ch_layout, &audio.codec->ch_layout));
+  require(av_frame_get_buffer(audio.frame, 0));
+  require(avformat_alloc_output_context2(&mux.format, nullptr, "mp4", nullptr));
+  auto* buffer = static_cast<unsigned char*>(av_malloc(4096));
+  if (!buffer) throw std::bad_alloc();
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
+  mux.io = avio_alloc_context(buffer, 4096, 1, &mux, nullptr, &Mux::write, nullptr);
+#else
+  mux.io = avio_alloc_context(buffer, 4096, 1, &mux, nullptr,
+      [](void* opaque, uint8_t* data, int size) { return Mux::write(opaque, data, size); }, nullptr);
+#endif
+  if (!mux.io) { av_free(buffer); throw std::bad_alloc(); }
+  mux.format->pb = mux.io; mux.format->flags |= AVFMT_FLAG_CUSTOM_IO;
+  auto* video_stream = avformat_new_stream(mux.format, nullptr);
+  auto* audio_stream = avformat_new_stream(mux.format, nullptr);
+  if (!video_stream || !audio_stream) throw std::bad_alloc();
+  video_stream->time_base = video.codec->time_base; audio_stream->time_base = audio.codec->time_base;
+  require(avcodec_parameters_from_context(video_stream->codecpar, video.codec));
+  require(avcodec_parameters_from_context(audio_stream->codecpar, audio.codec));
+  av_dict_set(&options, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
+  const auto header = avformat_write_header(mux.format, &options);
+  av_dict_free(&options); require(header);
+  mux.packet = av_packet_alloc(); if (!mux.packet) throw std::bad_alloc();
+  auto drain = [&](Encoder& encoder, AVStream* stream) {
+    while (true) {
+      const auto status = avcodec_receive_packet(encoder.codec, mux.packet);
+      if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) return;
+      require(status);
+      mux.packet->stream_index = stream->index;
+      if (stream == video_stream) mux.packet->duration = 1;
+      av_packet_rescale_ts(mux.packet, encoder.codec->time_base, stream->time_base);
+      require(av_interleaved_write_frame(mux.format, mux.packet));
+    }
+  };
+  int64_t audio_position = 0;
+  uint32_t noise = 17;
+  for (int index = 0; index < 60; ++index) {
+    require(av_frame_make_writable(video.frame));
+    for (int plane = 0; plane < 3; ++plane)
+      for (int row = 0; row < (plane ? 32 : 64); ++row)
+        for (int col = 0; col < (plane ? 32 : 64); ++col) {
+          noise = noise * 1664525u + 1013904223u;
+          video.frame->data[plane][row * video.frame->linesize[plane] + col] = plane ? 128 : noise >> 24;
+        }
+    video.frame->pts = index;
+    require(avcodec_send_frame(video.codec, video.frame)); drain(video, video_stream);
+    while (audio_position < (index + 1) * 4800) {
+      require(av_frame_make_writable(audio.frame));
+      auto* pcm = reinterpret_cast<float*>(audio.frame->data[0]);
+      for (int sample = 0; sample < audio.frame->nb_samples; ++sample)
+        pcm[sample] = 0.1f * std::sin(2.0 * 3.141592653589793 * 440.0 * (audio_position + sample) / 48000.0);
+      // Start encoded AAC at zero, including its priming frame, so the muxer
+      // need not shift the video timeline to compensate negative audio DTS.
+      audio.frame->pts = audio_position + audio.codec->initial_padding;
+      audio_position += audio.frame->nb_samples;
+      require(avcodec_send_frame(audio.codec, audio.frame)); drain(audio, audio_stream);
+    }
+  }
+  require(avcodec_send_frame(video.codec, nullptr)); drain(video, video_stream);
+  require(avcodec_send_frame(audio.codec, nullptr)); drain(audio, audio_stream);
+  require(av_write_trailer(mux.format)); avio_flush(mux.io);
+  if (mux.failure) std::rethrow_exception(mux.failure);
+  return mux.bytes;
 }

@@ -249,7 +249,7 @@ subscription, and checks closed-stream hypothesis and latest-revision hydration.
 Fixed-overlap cases assert the exact reference word sequence for both WAV
 and Matroska carrying the same speech plus MJPEG video. A speech-aware Matroska
 case also exercises VAD, packet preservation and hydrated final revisions.
-The video tests cover this codec/container combination, not H.264, HEVC,
+These speech pipeline tests cover this codec/container combination, not H.264, HEVC,
 fragmented MP4 or a general video-accuracy benchmark.
 
 To qualify the packaged worker with real inference, run
@@ -304,7 +304,7 @@ to return a chunk before the client sends its finish message, reconstructs
 binary source data, and checks full SHA-256 accounting. Additional tests cover
 concurrent snapshot/live transitions, future-stream selectors, replay eviction,
 slow subscribers, cancellation and malformed lifecycle messages. These tests
-include native WAV/NUT/Matroska media decoding but do not establish speech-recognition
+include native WAV/NUT/Matroska/fragmented-MP4 media decoding but do not establish speech-recognition
 correctness.
 
 Cancellation coverage includes two simultaneous subscribers: cancelling one
@@ -382,6 +382,15 @@ audio sample counts and original container bytes. Codec
 availability depends on the native FFmpeg build. The live gRPC tests hold back
 the final half of each input until decoded PCM arrives, verify all output
 samples and preserve the complete original source digest.
+
+Fragmented MP4 qualification covers H.264 video plus 48 kHz mono AAC audio,
+generated entirely in memory with native libx264/AAC encoders and the MP4
+muxer. Tests verify all 60 video frames and their relative timestamps, codec
+initialization data, continuous 16 kHz decoded audio, bounded AAC padding,
+non-silent signal energy, and byte-identical source reconstruction over gRPC.
+This does not qualify backward-seeking MP4, HEVC, HLS or DASH, or establish
+speech recognition accuracy for AAC inputs. Fixture encoders are test
+dependencies; the service does not encode or transcode the source video.
 
 The native WAV demuxer probes 64 KiB of audio for embedded SPDIF at startup,
 about two seconds for mono 16-bit 16 kHz input; shorter WAV files may need EOF
