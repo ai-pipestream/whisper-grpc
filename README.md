@@ -135,6 +135,12 @@ It accepts up to 32 open track/task RPCs per instance, with one inference slot.
 Concurrent inference requests beyond that slot return RESOURCE_EXHAUSTED,
 without an unbounded model queue. Clients must set deadlines and close unused
 streams; idle-stream expiry and a larger model pool are not implemented yet.
+Translation requires multilingual Whisper weights. English-only `.en` models
+reject translation requests before the worker handshake; they cannot produce
+results labeled as translations. With no language hint, English-only weights
+use English directly; language auto-detection is reserved for multilingual
+weights. Real multilingual translation qualification
+remains outstanding.
 No request media is saved to disk. `WHISPER_MODEL_ID` defaults to `tiny.en`,
 and `WHISPER_THREADS` defaults to four. The standalone executable uses the
 same settings and defaults to `127.0.0.1:50073`.

@@ -51,7 +51,8 @@ int main(int argc, char** argv) {
       pb::IngestRequest open;
       open.mutable_open()->mutable_direct()->set_name("reference.wav");
       auto* speech = open.mutable_open()->add_speech();
-      speech->set_model_id("test-tiny.en"); speech->set_language("en");
+      speech->set_model_id("test-tiny.en");
+      if (smart) speech->set_language("en");
       auto* w = speech->mutable_windowing(); w->set_window_ms(4000); w->set_overlap_ms(smart ? 500 : 1000);
       w->set_strategy(smart ? pb::CHUNKING_STRATEGY_SPEECH_AWARE : pb::CHUNKING_STRATEGY_FIXED);
       if (smart) {

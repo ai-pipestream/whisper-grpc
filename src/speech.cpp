@@ -35,6 +35,8 @@ const std::string& SpeechModel::model_id() const { return impl_->id; }
 int SpeechModel::threads() const { return impl_->threads; }
 std::string SpeechModel::library_version() { return std::string("whisper.cpp/") + whisper_version(); }
 void SpeechModel::validate_options(const pb::SpeechOptions& options) const {
+  if (options.task() == pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH && !whisper_is_multilingual(impl_->context))
+    throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "translation requires multilingual Whisper weights");
   if (options.model_id() != impl_->id || options.language().find('\0') != std::string::npos ||
       (!options.language().empty() && whisper_lang_id(options.language().c_str()) < 0) ||
       (options.task() != pb::SPEECH_TASK_UNSPECIFIED && options.task() != pb::SPEECH_TASK_TRANSCRIBE &&
@@ -60,7 +62,10 @@ std::vector<pb::TranscriptSegment> SpeechModel::infer(const SpeechWindow& window
   params.n_threads = impl_->threads;
   params.print_progress = params.print_realtime = params.print_timestamps = params.print_special = false;
   params.no_context = true;
-  params.language = options.language().empty() ? "auto" : options.language().c_str();
+  // English-only vocabularies do not contain language-selection tokens.
+  // Running multilingual detection on them can return unrelated language IDs.
+  params.language = !whisper_is_multilingual(impl_->context) ? "en" :
+      (options.language().empty() ? "auto" : options.language().c_str());
   params.translate = options.task() == pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH;
   params.token_timestamps = options.word_timestamps();
   params.abort_callback = [](void* opaque) noexcept {

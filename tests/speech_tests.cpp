@@ -25,6 +25,16 @@ int main(int argc, char** argv) {
     const auto weights = read(argv[1]);
     media::SpeechModel model(weights, "test-tiny.en", 4);
     check(model.model_hash().size() == 32, "missing model fingerprint");
+    media::pb::SpeechOptions unsupported_translation;
+    unsupported_translation.set_model_id("test-tiny.en");
+    unsupported_translation.set_task(media::pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH);
+    for (const std::string& language : {std::string(), std::string("en")}) {
+      unsupported_translation.set_language(language);
+      bool rejected_translation = false;
+      try { model.validate_options(unsupported_translation); }
+      catch (const media::Failure& f) { rejected_translation = f.code == grpc::StatusCode::INVALID_ARGUMENT; }
+      check(rejected_translation, "English-only weights accepted unsupported translation");
+    }
     const auto bytes = read(argv[2]);
     size_t offset = 0;
     media::SpeechWindow window{1, 16000, 16000, media::WindowBoundary::End, {}};
@@ -43,7 +53,7 @@ int main(int argc, char** argv) {
       }
     }, [] { return false; }, decode);
     media::pb::SpeechOptions options;
-    options.set_model_id("test-tiny.en"); options.set_language("en"); options.set_word_timestamps(true);
+    options.set_model_id("test-tiny.en"); options.set_word_timestamps(true);
     const auto segments = model.infer(window, 7, options, [] { return false; });
     std::string transcript;
     for (const auto& s : segments) {
@@ -88,6 +98,20 @@ int main(int argc, char** argv) {
     }
     auto stub = media::pb::SpeechWorkerService::NewStub(grpc::CreateChannel(
         external ? external : "127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+    {
+      grpc::ClientContext context;
+      context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+      auto rpc = stub->Transcribe(&context);
+      media::pb::TranscribeRequest request;
+      request.mutable_open()->set_stream_id(media::uuid());
+      *request.mutable_open()->mutable_options() = unsupported_translation;
+      check(rpc->Write(request), "translation rejection request write failed");
+      rpc->WritesDone();
+      media::pb::TranscribeResponse response;
+      check(!rpc->Read(&response), "English-only worker acknowledged translation");
+      check(rpc->Finish().error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+            "English-only worker did not reject translation");
+    }
     {
       grpc::ClientContext context;
       context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(60));
