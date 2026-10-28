@@ -219,7 +219,10 @@ VideoFixture matroska_fixture(std::string_view pcm16) {
   return result;
 }
 
-std::string fragmented_mp4_fixture() {
+std::string fragmented_mp4_fixture(std::string_view pcm16) {
+  if (pcm16.size()%2 || pcm16.size()>30*16000*2) throw std::invalid_argument("invalid MP4 fixture PCM");
+  const int sample_rate = pcm16.empty() ? 48000 : 16000;
+  const int frames = pcm16.empty() ? 60 : static_cast<int>((pcm16.size()/2 + 1599)/1600);
   Mux mux;
   struct Encoder {
     AVCodecContext* codec = nullptr;
@@ -242,14 +245,14 @@ std::string fragmented_mp4_fixture() {
   av_dict_set(&options, "tune", "zerolatency", 0);
   const auto opened = avcodec_open2(video.codec, h264, &options);
   av_dict_free(&options); require(opened);
-  audio.codec->sample_rate = 48000; audio.codec->time_base = {1, 48000};
+  audio.codec->sample_rate = sample_rate; audio.codec->time_base = {1, sample_rate};
   audio.codec->sample_fmt = AV_SAMPLE_FMT_FLTP; audio.codec->bit_rate = 64000;
   audio.codec->thread_count = 1; audio.codec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
   av_channel_layout_default(&audio.codec->ch_layout, 1);
   require(avcodec_open2(audio.codec, aac, nullptr));
   video.frame->width = video.frame->height = 64; video.frame->format = video.codec->pix_fmt;
   require(av_frame_get_buffer(video.frame, 32));
-  audio.frame->format = audio.codec->sample_fmt; audio.frame->sample_rate = 48000;
+  audio.frame->format = audio.codec->sample_fmt; audio.frame->sample_rate = sample_rate;
   audio.frame->nb_samples = audio.codec->frame_size;
   require(av_channel_layout_copy(&audio.frame->ch_layout, &audio.codec->ch_layout));
   require(av_frame_get_buffer(audio.frame, 0));
@@ -287,7 +290,7 @@ std::string fragmented_mp4_fixture() {
   };
   int64_t audio_position = 0;
   uint32_t noise = 17;
-  for (int index = 0; index < 60; ++index) {
+  for (int index = 0; index < frames; ++index) {
     require(av_frame_make_writable(video.frame));
     for (int plane = 0; plane < 3; ++plane)
       for (int row = 0; row < (plane ? 32 : 64); ++row)
@@ -297,11 +300,20 @@ std::string fragmented_mp4_fixture() {
         }
     video.frame->pts = index;
     require(avcodec_send_frame(video.codec, video.frame)); drain(video, video_stream);
-    while (audio_position < (index + 1) * 4800) {
+    while (audio_position < (index + 1) * (sample_rate/10)) {
       require(av_frame_make_writable(audio.frame));
       auto* pcm = reinterpret_cast<float*>(audio.frame->data[0]);
-      for (int sample = 0; sample < audio.frame->nb_samples; ++sample)
-        pcm[sample] = 0.1f * std::sin(2.0 * 3.141592653589793 * 440.0 * (audio_position + sample) / 48000.0);
+      for (int sample = 0; sample < audio.frame->nb_samples; ++sample) {
+        const auto position = static_cast<size_t>(audio_position + sample);
+        if (pcm16.empty())
+          pcm[sample] = 0.1f * std::sin(2.0 * 3.141592653589793 * 440.0 * position / sample_rate);
+        else if (position < pcm16.size()/2) {
+          const uint16_t bits = static_cast<unsigned char>(pcm16[position*2]) |
+              (static_cast<uint16_t>(static_cast<unsigned char>(pcm16[position*2+1])) << 8);
+          const int value = bits >= 32768 ? static_cast<int>(bits) - 65536 : bits;
+          pcm[sample] = static_cast<float>(value)/32768;
+        } else pcm[sample] = 0;
+      }
       // Start encoded AAC at zero, including its priming frame, so the muxer
       // need not shift the video timeline to compensate negative audio DTS.
       audio.frame->pts = audio_position + audio.codec->initial_padding;

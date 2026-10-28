@@ -246,11 +246,13 @@ ingress-to-worker tests in fixed and speech-aware modes, holds back the final
 quarter of the upload until a hypothesis arrives, checks original-byte and
 provenance integrity, verifies transcript revisions through a separate gRPC
 subscription, and checks closed-stream hypothesis and latest-revision hydration.
-Fixed-overlap cases assert the exact reference word sequence for both WAV
-and Matroska carrying the same speech plus MJPEG video. A speech-aware Matroska
-case also exercises VAD, packet preservation and hydrated final revisions.
-These speech pipeline tests cover this codec/container combination, not H.264, HEVC,
-fragmented MP4 or a general video-accuracy benchmark.
+Fixed-overlap cases assert the exact reference word sequence for WAV,
+Matroska carrying PCM speech plus MJPEG video, and fragmented MP4 carrying
+AAC speech plus H.264 video. Speech-aware Matroska and MP4 cases also exercise
+VAD, video packet counts and hydrated final revisions; these cases check
+recognition of the reference speech but do not assert every word. This is
+qualification of one English recording through these container/codec paths,
+not HEVC support or a general speech/video accuracy benchmark.
 
 To qualify the packaged worker with real inference, run
 `scripts/smoke-worker.sh IMAGE /path/to/ggml-tiny.en.bin /path/to/jfk.wav`
@@ -388,8 +390,9 @@ generated entirely in memory with native libx264/AAC encoders and the MP4
 muxer. Tests verify all 60 video frames and their relative timestamps, codec
 initialization data, continuous 16 kHz decoded audio, bounded AAC padding,
 non-silent signal energy, and byte-identical source reconstruction over gRPC.
-This does not qualify backward-seeking MP4, HEVC, HLS or DASH, or establish
-speech recognition accuracy for AAC inputs. Fixture encoders are test
+This does not qualify backward-seeking MP4, HEVC, HLS or DASH. The separate
+pipeline test covers one English speech recording encoded as AAC, as described
+above; it does not establish general AAC speech accuracy. Fixture encoders are test
 dependencies; the service does not encode or transcode the source video.
 
 The native WAV demuxer probes 64 KiB of audio for embedded SPDIF at startup,

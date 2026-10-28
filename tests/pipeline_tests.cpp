@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
       }
     }, [] {return false;}, decode);
     const auto video_fixture = matroska_fixture(pcm16);
+    const auto mp4_fixture = fragmented_mp4_fixture(pcm16);
     media::SpeechModel model(weights, "test-tiny.en", 4);
     media::SpeechWorker worker(model); Server worker_server(worker);
     media::SpeechPipelineFactory factory(worker_server.address(), vad);
@@ -68,14 +69,14 @@ int main(int argc, char** argv) {
     raw->set_model_id("test-tiny.en"); raw->set_reconcile_transcript(false);
     factory.resolve(raw_only);
     check(!raw_only.speech(0).reconcile_transcript() && !raw_only.speech(0).word_timestamps(), "raw-only option overridden");
-    for (int mode : {0, 1, 2}) {
-      const bool smart = mode==2, video = mode!=0;
-      const auto& data = video ? video_fixture.bytes : wav;
+    for (int mode : {0, 1, 2, 3, 4}) {
+      const bool smart = mode==2 || mode==4, video = mode!=0, mp4 = mode>=3;
+      const auto& data = mp4 ? mp4_fixture : video ? video_fixture.bytes : wav;
       size_t video_packets = 0;
       grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now() + 90s);
       auto rpc = stub->Ingest(&context);
       pb::IngestRequest open;
-      open.mutable_open()->mutable_direct()->set_name(video ? "reference.mkv" : "reference.wav");
+      open.mutable_open()->mutable_direct()->set_name(mp4 ? "reference.mp4" : video ? "reference.mkv" : "reference.wav");
       open.mutable_open()->mutable_decode()->set_emit_packets(video);
       auto* speech = open.mutable_open()->add_speech();
       speech->set_model_id("test-tiny.en");
@@ -135,14 +136,16 @@ int main(int argc, char** argv) {
       while (rpc->Read(&response)) {
         const auto& event = response.event();
         if (event.has_source()) source += event.source().data();
-        if (video && event.has_packet() && event.packet().track_id()==1) {
-          evidence_ok &= video_packets < video_fixture.video_packets.size() &&
-                         event.packet().data()==video_fixture.video_packets[video_packets];
+        if (video && event.has_packet() && event.packet().track_id()==(mp4 ? 0u : 1u)) {
+          if (mp4) evidence_ok &= !event.packet().data().empty() && event.packet().has_pts();
+          else evidence_ok &= video_packets < video_fixture.video_packets.size() &&
+                              event.packet().data()==video_fixture.video_packets[video_packets];
           ++video_packets;
         }
         if (event.has_hypothesis()) {
           saw_hypothesis = true; ++hypotheses;
           const auto& h = event.hypothesis();
+          evidence_ok &= h.track_id()==(mp4 ? 1u : 0u);
           evidence_ok &= event.producer().model_sha256() == model.model_hash() && h.contributors_size() == 1;
           if (smart) evidence_ok &= h.contributors(0).model_sha256() == media::sha256(vad);
           for (const auto& segment : h.segments()) {
@@ -182,7 +185,8 @@ int main(int argc, char** argv) {
         check(normalized == "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
               "streamed final transcript lost or duplicated boundary words");
       }
-      if (video) check(video_packets==video_fixture.video_packets.size(), "speech processing lost compressed video packets");
+      if (video) check(video_packets==(mp4 ? (pcm16.size()/2+1599)/1600 : video_fixture.video_packets.size()),
+                       "speech processing lost compressed video packets");
       check(!revisions.empty(), "no reconciled transcript published");
       for (const auto& [segment_id, segment] : revisions) check(segment.final(), "provisional tail not flushed before close");
       check(source == data && hypotheses >= 2 && evidence_ok, "pipeline source or provenance mismatch");
@@ -198,7 +202,7 @@ int main(int argc, char** argv) {
       for (const auto& segment : item.snapshot().transcripts())
         check(revisions.at(segment.segment_id()).SerializeAsString()==segment.SerializeAsString(), "hydration lost final revision or provenance");
       subscribe_context.TryCancel(); while (listener->Read(&item)) {} listener->Finish();
-      std::cout << (smart ? "Smart Matroska video" : video ? "Fixed Matroska video" : "Fixed WAV") << " ingress -> worker -> hydrated output passed\n";
+      std::cout << (mp4 ? (smart ? "Smart H.264/AAC MP4" : "Fixed H.264/AAC MP4") : smart ? "Smart Matroska video" : video ? "Fixed Matroska video" : "Fixed WAV") << " ingress -> worker -> hydrated output passed\n";
     }
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
