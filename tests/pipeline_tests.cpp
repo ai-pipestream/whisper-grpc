@@ -1,4 +1,5 @@
 #include "pipeline.h"
+#include "http_fixture.h"
 #include "service.h"
 #include "worker.h"
 #include "decoder.h"
@@ -37,6 +38,94 @@ struct Server {
   ~Server() { server->Shutdown(); server->Wait(); }
   std::string address() const { return "127.0.0.1:" + std::to_string(port); }
 };
+void check_reference(const std::string& text) {
+  std::string normalized; bool space = false;
+  for (unsigned char c : text) {
+    if (c >= 'A' && c <= 'Z') c += 'a'-'A';
+    if (c >= 'a' && c <= 'z') { if (space && !normalized.empty()) normalized += ' '; normalized += c; space = false; }
+    else if (c == ' ') space = true;
+  }
+  check(normalized == "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+        "streamed final transcript lost or duplicated boundary words");
+}
+void http_pipeline(const media::SpeechPipelineFactory& factory, const std::string& model_hash,
+                   const std::string& data, size_t expected_video_packets) {
+  Fixture feed([&](int fd, Fixture& fixture) {
+    send_bytes(fd, "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: " + std::to_string(data.size()) + "\r\n\r\n");
+    const auto split = data.size()*3/4;
+    send_bytes(fd, data.substr(0, split));
+    while (!fixture.release && !fixture.stop) std::this_thread::sleep_for(1ms);
+    if (!fixture.stop) send_bytes(fd, data.substr(split));
+  });
+  media::Registry registry;
+  media::Service service(registry, &factory, feed.policy()); Server server(service);
+  auto stub = pb::MediaService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
+  grpc::ClientContext live_context; live_context.set_deadline(std::chrono::system_clock::now()+90s);
+  pb::SubscribeRequest subscription; subscription.add_payload_kinds(pb::PAYLOAD_KIND_TRANSCRIPT);
+  subscription.mutable_hydration()->set_metadata(true);
+  // No UUID selector: register before the stream exists and follow future streams.
+  auto live = stub->Subscribe(&live_context, subscription);
+  pb::SubscribeResponse delivered;
+  check(live->Read(&delivered) && delivered.has_snapshot_begin(), "global HTTP subscription begin missing");
+  check(live->Read(&delivered) && delivered.has_snapshot_end(), "empty HTTP snapshot missing end");
+  grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now()+90s);
+  pb::PullRequest request; request.mutable_open()->mutable_http()->set_url(feed.url);
+  request.mutable_open()->mutable_decode()->set_emit_packets(true);
+  auto* speech = request.mutable_open()->add_speech(); speech->set_model_id("test-tiny.en");
+  speech->mutable_windowing()->set_window_ms(4000); speech->mutable_windowing()->set_overlap_ms(1000);
+  auto pull = stub->Pull(&context, request);
+  pb::PullResponse response;
+  std::string source, final_text, id;
+  bool http_info = false, closed = false, hypothesis = false;
+  size_t packets = 0;
+  std::map<std::string, pb::TranscriptSegment> revisions;
+  while (pull->Read(&response)) {
+    const auto& event = response.event();
+    if (event.has_opened()) {
+      id = event.cursor().stream_id();
+      check(live->Read(&delivered) && delivered.event().has_opened() && delivered.event().cursor().stream_id()==id,
+            "global subscriber missed future HTTP stream");
+    }
+    if (event.has_http_info()) http_info = event.http_info().origin()==media::HttpInput::origin(feed.url) &&
+        event.http_info().status_code()==200 && event.producer().library_version().starts_with("libcurl/");
+    if (event.has_source()) source += event.source().data();
+    if (event.has_packet() && event.packet().track_id()==0) ++packets;
+    if (event.has_hypothesis()) {
+      check(event.hypothesis().track_id()==1 && event.producer().model_sha256()==model_hash, "HTTP speech provenance mismatch");
+      hypothesis = true; feed.release = true;
+    }
+    if (event.has_transcript()) {
+      const auto& t = event.transcript();
+      check(t.source_language()=="en" && t.output_language()=="en" && t.contributors_size()==2 &&
+            t.contributors(0).model_sha256()==model_hash, "HTTP transcript provenance missing");
+      if (revisions.contains(t.segment_id()))
+        check(!revisions.at(t.segment_id()).final() && t.revision()==revisions.at(t.segment_id()).revision()+1,
+              "HTTP transcript revision is not contiguous");
+      else check(t.revision()==1, "HTTP transcript started at wrong revision");
+      revisions[t.segment_id()] = t;
+      if (t.final()) final_text += t.text();
+      check(live->Read(&delivered) && delivered.event().transcript().SerializeAsString()==t.SerializeAsString(),
+            "HTTP transcript differs on global subscription");
+    }
+    if (event.has_closed()) closed = event.closed().status_code()==0 && event.closed().source_sha256()==media::sha256(data);
+  }
+  check(pull->Finish().ok() && hypothesis && http_info && closed && source==data && packets==expected_video_packets,
+        "HTTP video speech pipeline incomplete");
+  check_reference(final_text);
+  check(live->Read(&delivered) && delivered.event().has_closed(), "global subscriber missed HTTP close");
+  live_context.TryCancel(); while (live->Read(&delivered)) {} live->Finish();
+  grpc::ClientContext hydrate_context; hydrate_context.set_deadline(std::chrono::system_clock::now()+5s);
+  subscription.add_stream_ids(id);
+  auto hydrate = stub->Subscribe(&hydrate_context, subscription);
+  check(hydrate->Read(&delivered) && delivered.has_snapshot_begin(), "HTTP hydration begin missing");
+  check(hydrate->Read(&delivered) && delivered.has_snapshot() && delivered.snapshot().has_closed() &&
+        delivered.snapshot().http_info().status_code()==200 &&
+        delivered.snapshot().transcripts_size()==static_cast<int>(revisions.size()), "HTTP hydration incomplete");
+  for (const auto& t : delivered.snapshot().transcripts())
+    check(t.final() && revisions.at(t.segment_id()).SerializeAsString()==t.SerializeAsString(), "HTTP hydration lost final transcript");
+  hydrate_context.TryCancel(); while (hydrate->Read(&delivered)) {} hydrate->Finish();
+  std::cout << "Local HTTP H.264/AAC -> worker -> global subscriber and hydration passed\n";
+}
 int main(int argc, char** argv) {
   try {
     if (argc != 4) throw std::runtime_error("usage: pipeline_tests WHISPER_MODEL VAD_MODEL JFK_WAV");
@@ -175,16 +264,7 @@ int main(int argc, char** argv) {
       const auto status = rpc->Finish();
       if (!status.ok()) std::cerr << "pipeline status: " << status.error_code() << ' ' << status.error_message() << '\n';
       check(status.ok() && writes_ok && closed, "pipeline did not close successfully");
-      if (!smart) {
-        std::string normalized; bool space = false;
-        for (unsigned char c : final_text) {
-          if (c >= 'A' && c <= 'Z') c += 'a'-'A';
-          if (c >= 'a' && c <= 'z') { if (space && !normalized.empty()) normalized += ' '; normalized += c; space = false; }
-          else if (c == ' ') space = true;
-        }
-        check(normalized == "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
-              "streamed final transcript lost or duplicated boundary words");
-      }
+      if (!smart) check_reference(final_text);
       if (video) check(video_packets==(mp4 ? (pcm16.size()/2+1599)/1600 : video_fixture.video_packets.size()),
                        "speech processing lost compressed video packets");
       check(!revisions.empty(), "no reconciled transcript published");
@@ -204,5 +284,6 @@ int main(int argc, char** argv) {
       subscribe_context.TryCancel(); while (listener->Read(&item)) {} listener->Finish();
       std::cout << (mp4 ? (smart ? "Smart H.264/AAC MP4" : "Fixed H.264/AAC MP4") : smart ? "Smart Matroska video" : video ? "Fixed Matroska video" : "Fixed WAV") << " ingress -> worker -> hydrated output passed\n";
     }
+    http_pipeline(factory, model.model_hash(), mp4_fixture, (pcm16.size()/2+1599)/1600);
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

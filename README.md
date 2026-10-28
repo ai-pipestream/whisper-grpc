@@ -254,6 +254,15 @@ recognition of the reference speech but do not assert every word. This is
 qualification of one English recording through these container/codec paths,
 not HEVC support or a general speech/video accuracy benchmark.
 
+The same executable also runs a local HTTP-to-speech integration case with a
+native loopback HTTP server and H.264/AAC video. The server withholds the final
+quarter of the response until a Whisper hypothesis arrives. A global subscriber
+registered before the stream exists must receive its opening event, every
+transcript revision and closure. The test verifies the exact reference words,
+source digest, model provenance, HTTP metadata and final transcript hydration.
+This local HTTP case runs locally even when `MEDIA_PIPELINE_TEST_TARGET` points
+the direct-ingress cases at an external deployment.
+
 To qualify the packaged worker with real inference, run
 `scripts/smoke-worker.sh IMAGE /path/to/ggml-tiny.en.bin /path/to/jfk.wav`
 after building the local test executables. The fixture is available under the
