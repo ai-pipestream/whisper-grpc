@@ -1,4 +1,5 @@
 #include "pipeline.h"
+#include "reconcile.h"
 #include "vad.h"
 #include "windowing.h"
 #include "speech.h"
@@ -43,6 +44,20 @@ class Track {
             response.opened().producer().configuration_sha256().size() == 32 &&
             valid_uuid(response.opened().producer().machine_id()), "invalid worker handshake");
     track_ = track;
+    overlap_ = policy(options).overlap_samples;
+    if (options.reconcile_transcript()) {
+      reconciler_ = std::make_unique<Reconciler>([this](pb::TranscriptSegment segment) {
+        pb::StreamEvent event;
+        *event.mutable_producer() = selector_;
+        event.mutable_producer()->set_service("whisper-media-reconciliation");
+        event.mutable_producer()->clear_model_id(); event.mutable_producer()->clear_model_sha256();
+        event.mutable_producer()->set_configuration_sha256(sha256("reconciliation-v1:timing-tolerance-us=350000"));
+        *segment.mutable_producer() = event.producer();
+        *segment.add_contributors() = producer_; *segment.add_contributors() = selector_;
+        *event.mutable_transcript() = std::move(segment);
+        emit_(std::move(event));
+      });
+    }
     producer_ = response.opened().producer();
     selector_.set_machine_id(machine); selector_.set_service("whisper-media-windowing");
     selector_.set_app_version(MEDIA_APP_VERSION); selector_.set_build_id(MEDIA_BUILD_ID);
@@ -102,6 +117,7 @@ class Track {
     require(!wire_->Read(&response), "unexpected worker output after close");
     const auto status = wire_->Finish(); done_ = true;
     if (!status.ok()) throw Failure(status.error_code(), "speech worker failed at close");
+    if (reconciler_) reconciler_->finish();
   }
  private:
   [[noreturn]] void failed() {
@@ -141,7 +157,12 @@ class Track {
       }
     }
     *event.mutable_hypothesis()->add_contributors() = selector_;
-    emit_(std::move(event)); ++count_;
+    // Preserve the raw hypothesis before publishing any derived revisions.
+    const auto hypothesis = event.hypothesis();
+    emit_(std::move(event));
+    if (reconciler_) reconciler_->accept(hypothesis,
+        window.boundary == WindowBoundary::Fixed || window.boundary == WindowBoundary::Forced ? overlap_ : 0);
+    ++count_;
   }
   EmitProcessed emit_;
   std::unique_ptr<grpc::ClientContext> context_;
@@ -150,6 +171,8 @@ class Track {
   pb::Producer producer_, selector_;
   std::unique_ptr<Windowing> windows_;
   std::unique_ptr<VoiceActivity> vad_;
+  std::unique_ptr<Reconciler> reconciler_;
+  uint32_t overlap_ = 0;
   uint64_t count_ = 0, samples_ = 0, chunks_ = 0;
   bool done_ = false;
   uint32_t track_ = 0;
@@ -192,6 +215,8 @@ void SpeechPipelineFactory::resolve(pb::OpenStream& request) const {
   require(request.speech_size() > 0 && request.speech_size() <= 4, "one to four speech tasks are supported");
   for (auto& options : *request.mutable_speech()) {
     require(!options.model_id().empty() && options.model_id().size() <= 256, "speech model ID required");
+    if (!options.has_reconcile_transcript()) options.set_reconcile_transcript(true);
+    if (options.reconcile_transcript()) options.set_word_timestamps(true);
     auto* w = options.mutable_windowing();
     if (!w->has_window_ms()) w->set_window_ms(10000);
     if (!w->has_overlap_ms()) w->set_overlap_ms(1000);

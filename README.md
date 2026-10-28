@@ -6,10 +6,10 @@ Typed live audio/video ingestion and speech processing over gRPC.
 The C++ server implements direct byte-stream ingress, UUID subscriptions,
 bounded in-memory hydration, checksums, lifecycle events and native FFmpeg
 demux/audio decoding. Configured ingress routes audio through fixed or VAD-based
-windows to a separate native Whisper worker and publishes provisional hypotheses.
-The `Pull` RPC reads permitted HTTP sources through the same pipeline. Cross-window
-transcript reconciliation is tested as a standalone component; streaming revision
-publication and hydration are not wired yet.
+windows to a separate native Whisper worker and publishes raw hypotheses plus
+reconciled transcript revisions.
+The `Pull` RPC reads permitted HTTP sources through the same pipeline. Revisions
+are delivered live and retained in bounded hydration state.
 The media path calls native libraries with no JSON bridge, shell-based media
 processing, or request-file writes.
 
@@ -25,7 +25,7 @@ The native CPU Whisper adapter is built by default (`MEDIA_BUILD_SPEECH=OFF`
 omits it). Its source is pinned by commit and archive checksum. It loads model
 bytes in memory, fingerprints the exact weights, and returns native segment
 text, token IDs, probabilities, language and timestamps. Adapter results remain
-provisional until ingress integration of the standalone reconciler is complete.
+provisional; ingress publishes separately reconciled revisions.
 The separate `SpeechWorkerService.Transcribe` RPC invokes this adapter and is
 called by configured media ingress.
 
@@ -37,7 +37,7 @@ phrases and native metadata, and tests cancellation and model-ID rejection.
 The test is not registered without a model path; ordinary test success does
 not imply model qualification. Model assets are never downloaded by a request.
 
-The standalone reconciler keeps a bounded provisional tail and joins overlapping
+The reconciler keeps a bounded provisional tail and joins overlapping
 lexical tokens using text and source-time evidence. It emits stable segment IDs
 with increasing revisions, preserves competing text as `UNRESOLVED` when a join
 is ambiguous, and stops after validation or delivery failure. Raw hypotheses
@@ -141,9 +141,18 @@ policy. The current detector threshold is 0.5. Resolved options are echoed
 in the opening event. Without a worker target, speech requests fail explicitly.
 
 Ingress publishes `SpeechHypothesis` events with window boundaries, native
-worker identity and upstream window/VAD provenance. These are distinct from
-`TranscriptSegment` revision events: overlapping hypotheses may repeat text
-and remain provisional. Native presentation times are applied when available;
+worker identity and upstream window/VAD provenance. Raw hypotheses remain
+provisional and may repeat overlap text. By default, ingress also publishes
+`TranscriptSegment` revisions with stable IDs, increasing revision numbers and
+explicit reconciliation status. Set `speech.reconcile_transcript=false` to request
+raw hypotheses only. Reconciliation enables token timings in the resolved
+opening options. Reconciled revisions identify the ingress reconciler, worker
+model and window/VAD contributors. A final revision is immutable but can still
+be `UNRESOLVED`: finalization does not assert recognition accuracy or a unique
+boundary match. Remaining provisional tails flush before successful closure.
+Hydration keeps the latest revision per retained segment, up to 64 segments,
+sharing the retention-byte budget with raw hypotheses; eviction is explicit.
+Native presentation times are applied when available;
 otherwise timestamps remain on the decoded sample timeline. The latest 16
 hypotheses, further bounded by the stream retention-byte budget, are hydratable;
 eviction sets `result_state_truncated`. Original source bytes remain independent.

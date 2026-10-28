@@ -5,7 +5,7 @@ bounded hydration, source checksums and native FFmpeg demux/audio decoding have
 a C++ implementation and loopback gRPC tests. The sections below describe the
 full target, including work not yet implemented. The separate speech worker
 performs native inference and ingress chains to it through fixed or real VAD
-windows. HTTP Pull uses the same processing path; reconciliation remains pending. See README.md for
+windows. HTTP Pull uses the same processing path; reconciled revisions are published and hydrated. See README.md for
 current format coverage and limits.
 
 ## Required behavior
@@ -27,9 +27,9 @@ The ingress stream can return original media, speech output, or both. Output
 filters must not silently turn off processing requested by other subscribers.
 The subscription contract includes initial container/track/packet descriptors.
 The worker protocol now carries explicit pre-cut windows and provisional
-hypotheses. Ingress publishes and hydrates bounded provisional hypotheses;
-final transcript reconciliation and full native metadata coverage still need
-implementation and validation.
+hypotheses. Ingress publishes raw hypotheses and reconciled transcript revisions,
+with bounded latest-revision hydration. Broader acoustic qualification and the
+full native metadata coverage audit remain unfinished.
 
 ## Speech-aware chunking and optional overlap
 

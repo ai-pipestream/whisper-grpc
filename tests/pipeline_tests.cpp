@@ -8,6 +8,7 @@
 #include <iostream>
 #include <iterator>
 #include <thread>
+#include <map>
 
 using namespace std::chrono_literals;
 namespace pb = media::pb;
@@ -38,6 +39,10 @@ int main(int argc, char** argv) {
     media::SpeechPipelineFactory factory(worker_server.address(), vad);
     media::Registry registry; media::Service ingress(registry, &factory); Server ingress_server(ingress);
     auto stub = pb::MediaService::NewStub(grpc::CreateChannel(ingress_server.address(), grpc::InsecureChannelCredentials()));
+    pb::OpenStream raw_only; auto* raw = raw_only.add_speech();
+    raw->set_model_id("test-tiny.en"); raw->set_reconcile_transcript(false);
+    factory.resolve(raw_only);
+    check(!raw_only.speech(0).reconcile_transcript() && !raw_only.speech(0).word_timestamps(), "raw-only option overridden");
     for (bool smart : {false, true}) {
       grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now() + 90s);
       auto rpc = stub->Ingest(&context);
@@ -45,7 +50,7 @@ int main(int argc, char** argv) {
       open.mutable_open()->mutable_direct()->set_name("reference.wav");
       auto* speech = open.mutable_open()->add_speech();
       speech->set_model_id("test-tiny.en"); speech->set_language("en");
-      auto* w = speech->mutable_windowing(); w->set_window_ms(4000); w->set_overlap_ms(smart ? 500 : 0);
+      auto* w = speech->mutable_windowing(); w->set_window_ms(4000); w->set_overlap_ms(smart ? 500 : 1000);
       w->set_strategy(smart ? pb::CHUNKING_STRATEGY_SPEECH_AWARE : pb::CHUNKING_STRATEGY_FIXED);
       if (smart) {
         auto* b = w->mutable_speech_boundary(); b->set_vad_model_id("silero-v5.1.2");
@@ -57,6 +62,12 @@ int main(int argc, char** argv) {
       check(rpc->Read(&response) && response.event().has_opened(), "ingress handshake missing");
       const auto id = response.event().cursor().stream_id();
       check(response.event().opened().speech_size() == 1, "speech options not echoed");
+      check(response.event().opened().speech(0).reconcile_transcript() &&
+            response.event().opened().speech(0).word_timestamps(), "resolved reconciliation options missing");
+      pb::SubscribeRequest live_request; live_request.add_stream_ids(id);
+      live_request.add_payload_kinds(pb::PAYLOAD_KIND_TRANSCRIPT);
+      auto live = registry.subscribe(live_request);
+      std::map<std::string, pb::TranscriptSegment> revisions;
       std::atomic<bool> saw_hypothesis{false}, done{false}, writes_ok{true};
       std::jthread writer([&] {
         size_t offset = 0; uint64_t count = 0;
@@ -83,7 +94,7 @@ int main(int argc, char** argv) {
         if (!rpc->Write(finish)) writes_ok = false;
         rpc->WritesDone();
       });
-      std::string source, text;
+      std::string source, text, final_text;
       int hypotheses = 0; bool closed = false, evidence_ok = true;
       while (rpc->Read(&response)) {
         const auto& event = response.event();
@@ -95,12 +106,37 @@ int main(int argc, char** argv) {
           if (smart) evidence_ok &= h.contributors(0).model_sha256() == media::sha256(vad);
           for (const auto& segment : h.segments()) { text += segment.text(); evidence_ok &= !segment.final(); }
         }
+        if (event.has_transcript()) {
+          const auto& t = event.transcript();
+          if (revisions.contains(t.segment_id())) {
+            const auto& prior = revisions.at(t.segment_id());
+            evidence_ok &= !prior.final() && t.revision() == prior.revision()+1;
+          } else evidence_ok &= t.revision()==1;
+          evidence_ok &= t.producer().service()=="whisper-media-reconciliation" && t.contributors_size()==2 &&
+                         t.contributors(0).model_sha256()==model.model_hash();
+          if (t.final()) final_text += t.text();
+          revisions[t.segment_id()] = t;
+          pb::SubscribeResponse delivered;
+          evidence_ok &= live->next(delivered, 1s) && delivered.event().transcript().SerializeAsString()==t.SerializeAsString();
+        }
         if (event.has_closed()) closed = event.closed().status_code() == 0 && event.closed().source_sha256() == media::sha256(data);
       }
       done = true; writer.join();
       const auto status = rpc->Finish();
       if (!status.ok()) std::cerr << "pipeline status: " << status.error_code() << ' ' << status.error_message() << '\n';
       check(status.ok() && writes_ok && closed, "pipeline did not close successfully");
+      if (!smart) {
+        std::string normalized; bool space = false;
+        for (unsigned char c : final_text) {
+          if (c >= 'A' && c <= 'Z') c += 'a'-'A';
+          if (c >= 'a' && c <= 'z') { if (space && !normalized.empty()) normalized += ' '; normalized += c; space = false; }
+          else if (c == ' ') space = true;
+        }
+        check(normalized == "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+              "streamed final transcript lost or duplicated boundary words");
+      }
+      check(!revisions.empty(), "no reconciled transcript published");
+      for (const auto& [segment_id, segment] : revisions) check(segment.final(), "provisional tail not flushed before close");
       check(source == data && hypotheses >= 2 && evidence_ok, "pipeline source or provenance mismatch");
       check(text.find("country") != std::string::npos, "pipeline did not recognize reference speech");
       grpc::ClientContext subscribe_context; subscribe_context.set_deadline(std::chrono::system_clock::now() + 5s);
@@ -110,6 +146,9 @@ int main(int argc, char** argv) {
       check(listener->Read(&item) && item.has_snapshot_begin(), "speech hydration begin missing");
       check(listener->Read(&item) && item.has_snapshot(), "speech hydration missing");
       check(item.snapshot().hypotheses_size() == hypotheses && item.snapshot().has_closed(), "speech results not hydrated");
+      check(item.snapshot().transcripts_size()==static_cast<int>(revisions.size()), "transcript hydration duplicated revisions");
+      for (const auto& segment : item.snapshot().transcripts())
+        check(revisions.at(segment.segment_id()).SerializeAsString()==segment.SerializeAsString(), "hydration lost final revision or provenance");
       subscribe_context.TryCancel(); while (listener->Read(&item)) {} listener->Finish();
       std::cout << (smart ? "Smart" : "Fixed") << " ingress -> worker -> hydrated output passed\n";
     }

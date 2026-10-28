@@ -219,20 +219,32 @@ pb::StreamEvent Registry::close(const std::string& id, const pb::StreamClosed& c
 }
 
 pb::StreamEvent Registry::derived(const std::string& id, pb::StreamEvent event, const std::string& library_version) {
-  require(event.has_media_info() || event.has_audio() || event.has_packet() || event.has_hypothesis() || event.has_http_info(),
+  require(event.has_media_info() || event.has_audio() || event.has_packet() || event.has_hypothesis() || event.has_transcript() || event.has_http_info(),
           grpc::StatusCode::INVALID_ARGUMENT, "unsupported derived payload");
   require(event.ByteSizeLong() <= 512 * 1024, grpc::StatusCode::RESOURCE_EXHAUSTED, "derived event exceeds limit");
   std::lock_guard lock(mutex_);
   auto it = streams_.find(id);
   require(it != streams_.end(), grpc::StatusCode::NOT_FOUND, "unknown stream");
   require(!it->second.closed, grpc::StatusCode::FAILED_PRECONDITION, "stream is closed");
-  if (!event.has_hypothesis()) {
+  if (!event.has_hypothesis() && !event.has_transcript()) {
     *event.mutable_producer() = it->second.producer;
     event.mutable_producer()->set_library_version(library_version);
-  } else {
+  } else if (event.has_hypothesis()) {
     require(event.has_producer() && event.producer().model_sha256().size() == 32,
             grpc::StatusCode::INVALID_ARGUMENT, "speech event requires native model provenance");
     *event.mutable_hypothesis()->mutable_producer() = event.producer();
+  }
+  if (event.has_transcript()) {
+    const auto& t = event.transcript();
+    require(valid_uuid(t.segment_id()) && t.revision() > 0 && event.has_producer() &&
+            t.producer().SerializeAsString() == event.producer().SerializeAsString() &&
+            valid_uuid(t.producer().machine_id()) && t.producer().configuration_sha256().size() == 32 &&
+            t.contributors_size() > 0 && t.contributors(0).model_sha256().size() == 32,
+            grpc::StatusCode::INVALID_ARGUMENT, "transcript requires identity and processing provenance");
+    for (const auto& prior : it->second.snapshot.transcripts())
+      if (prior.segment_id() == t.segment_id())
+        require(!prior.final() && t.revision() == prior.revision() + 1 && t.track_id() == prior.track_id(),
+                grpc::StatusCode::INVALID_ARGUMENT, "invalid transcript revision");
   }
   bool found = false;
   for (const auto& existing : it->second.snapshot.producers())
@@ -243,15 +255,23 @@ pb::StreamEvent Registry::derived(const std::string& id, pb::StreamEvent event, 
   }
   if (event.has_media_info()) *it->second.snapshot.mutable_media_info() = event.media_info();
   if (event.has_http_info()) *it->second.snapshot.mutable_http_info() = event.http_info();
-  if (event.has_hypothesis()) {
-    auto& snapshot = it->second.snapshot;
-    auto* hypotheses = snapshot.mutable_hypotheses();
-    // Bounded recent results; full historical reconstruction uses retained events.
-    *hypotheses->Add() = event.hypothesis();
-    while (hypotheses->size() > 16 || (hypotheses->size() && snapshot.ByteSizeLong() > limits_.retention_bytes)) {
-      hypotheses->DeleteSubrange(0, 1);
-      snapshot.set_result_state_truncated(true);
-    }
+  auto& snapshot = it->second.snapshot;
+  auto* hypotheses = snapshot.mutable_hypotheses();
+  auto* transcripts = snapshot.mutable_transcripts();
+  if (event.has_hypothesis()) *hypotheses->Add() = event.hypothesis();
+  if (event.has_transcript()) {
+    for (int i = 0; i < transcripts->size(); ++i)
+      if (transcripts->Get(i).segment_id() == event.transcript().segment_id()) {
+        transcripts->DeleteSubrange(i, 1); break;
+      }
+    *transcripts->Add() = event.transcript();
+  }
+  while (hypotheses->size() > 16) { hypotheses->DeleteSubrange(0, 1); snapshot.set_result_state_truncated(true); }
+  while (transcripts->size() > 64) { transcripts->DeleteSubrange(0, 1); snapshot.set_result_state_truncated(true); }
+  while (snapshot.ByteSizeLong() > limits_.retention_bytes && (hypotheses->size() || transcripts->size())) {
+    if (hypotheses->size()) hypotheses->DeleteSubrange(0, 1);
+    else transcripts->DeleteSubrange(0, 1);
+    snapshot.set_result_state_truncated(true);
   }
   return publish(id, it->second, std::move(event));
 }

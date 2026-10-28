@@ -226,6 +226,10 @@ message SpeechOptions {
   bool word_timestamps = 4;
   // Decoded-audio inference windows; does not change original source chunks.
   SpeechWindowing windowing = 5;
+  // Ingress publishes reconciled revisions by default; false requests raw hypotheses
+  // only. Reconciliation enables token timings in the resolved opening options.
+  // The native worker always returns raw hypotheses and ignores this ingress option.
+  optional bool reconcile_transcript = 6;
 }
 
 // Audio-window policy, resolved and echoed in StreamOpened.
@@ -545,6 +549,10 @@ message TranscriptSegment {
   repeated SpeechToken tokens = 12;
   // Whether overlap text was aligned, needed no alignment, or remains ambiguous.
   ReconciliationStatus reconciliation = 13;
+  // Producer of this derived revision; absent on raw native segments.
+  Producer producer = 14;
+  // Native inference and window selection contributors.
+  repeated Producer contributors = 15;
 }
 
 // Evidence supporting a rendered transcript revision, distinct from ASR accuracy.

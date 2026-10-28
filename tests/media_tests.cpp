@@ -159,6 +159,38 @@ void subscriber_backpressure_isolation() {
   check(slow->status().error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED, "slow subscriber failed silently");
 }
 
+void transcript_revisions() {
+  media::Limits limits; limits.retention_bytes = 4096;
+  media::Registry registry(limits);
+  const auto id = registry.open(open_request()).cursor().stream_id();
+  const auto segment_id = media::uuid();
+  pb::StreamEvent event;
+  auto* producer = event.mutable_producer(); producer->set_machine_id(media::uuid());
+  producer->set_service("test-reconciler"); producer->set_configuration_sha256(std::string(32, 'c'));
+  auto* t = event.mutable_transcript(); t->set_segment_id(segment_id); t->set_revision(1); t->set_text("first");
+  *t->mutable_producer() = *producer;
+  t->add_contributors()->set_model_sha256(std::string(32, 'm'));
+  registry.derived(id, event, "");
+  t->set_revision(3);
+  fails(grpc::StatusCode::INVALID_ARGUMENT, [&] {registry.derived(id, event, "");});
+  t->set_revision(2); t->set_final(true); t->set_text("final"); registry.derived(id, event, "");
+  t->set_revision(3);
+  fails(grpc::StatusCode::INVALID_ARGUMENT, [&] {registry.derived(id, event, "");});
+  pb::SubscribeRequest request; request.add_stream_ids(id); request.mutable_hydration()->set_metadata(true);
+  auto sub = registry.subscribe(request); next(sub);
+  const auto snapshot = next(sub).snapshot();
+  check(snapshot.transcripts_size()==1 && snapshot.transcripts(0).revision()==2 && snapshot.transcripts(0).text()=="final",
+        "hydration did not retain latest final transcript");
+  for (int i=0; i<30; ++i) {
+    t->set_segment_id(media::uuid()); t->set_revision(1); t->set_text(std::string(600,'x'));
+    registry.derived(id, event, "");
+  }
+  auto bounded = registry.subscribe(request); next(bounded);
+  const auto state = next(bounded).snapshot();
+  check(state.result_state_truncated() && state.transcripts_size()>0 && state.transcripts_size()<30 &&
+        state.ByteSizeLong()<=limits.retention_bytes, "transcript retention exceeded byte budget");
+}
+
 void bounded_registry_and_capabilities() {
   {
     media::Limits bounded;
@@ -415,6 +447,7 @@ int main() {
   try {
     uuid_selection_and_future_streams();
     snapshot_live_atomicity();
+    transcript_revisions();
     replay_eviction_and_filtering();
     subscriber_backpressure_isolation();
     bounded_registry_and_capabilities();
