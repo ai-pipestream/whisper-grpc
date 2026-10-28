@@ -543,6 +543,22 @@ message TranscriptSegment {
   optional double average_log_probability = 11;
   // Engine tokens, preserving IDs and timings instead of inventing word boundaries.
   repeated SpeechToken tokens = 12;
+  // Whether overlap text was aligned, needed no alignment, or remains ambiguous.
+  ReconciliationStatus reconciliation = 13;
+}
+
+// Evidence supporting a rendered transcript revision, distinct from ASR accuracy.
+enum ReconciliationStatus {
+  // Native hypothesis; reconciliation has not been attempted.
+  RECONCILIATION_STATUS_UNSPECIFIED = 0;
+  // No competing recognized text needed overlap alignment.
+  RECONCILIATION_STATUS_DIRECT = 1;
+  // Overlap was joined using lexical and temporal evidence.
+  RECONCILIATION_STATUS_ALIGNED = 2;
+  // No unique safe join was established; competing text is retained explicitly.
+  RECONCILIATION_STATUS_UNRESOLVED = 3;
+  // Provisional tail awaiting more source context.
+  RECONCILIATION_STATUS_PENDING = 4;
 }
 
 // A token emitted by the native inference API.
@@ -557,6 +573,38 @@ message SpeechToken {
   optional int64 start_us = 4;
   // Source timeline end when available, in microseconds.
   optional int64 end_us = 5;
+  // Distinguishes lexical text from model control/timestamp tokens.
+  SpeechTokenKind kind = 6;
+  // Native Whisper values, preserving confidence and timing diagnostics.
+  WhisperTokenMetadata whisper = 7;
+}
+
+// Semantic role of a model token; control tokens are retained but not rendered.
+enum SpeechTokenKind {
+  // The backend did not classify this token.
+  SPEECH_TOKEN_KIND_UNSPECIFIED = 0;
+  // Lexical text contributing bytes to the segment text.
+  SPEECH_TOKEN_KIND_TEXT = 1;
+  // Model control, language, task or timestamp token.
+  SPEECH_TOKEN_KIND_CONTROL = 2;
+}
+
+// Native whisper_token_data fields not represented by generic token metadata.
+message WhisperTokenMetadata {
+  // Forced timestamp token vocabulary ID.
+  int32 timestamp_token_id = 1;
+  // Native lexical token log probability.
+  float log_probability = 2;
+  // Probability of the timestamp token.
+  float timestamp_probability = 3;
+  // Sum of probabilities over timestamp tokens.
+  float timestamp_probability_sum = 4;
+  // Native window-relative start in centiseconds, only when timing was computed.
+  optional int64 start_centiseconds = 5;
+  // Native window-relative end in centiseconds, only when timing was computed.
+  optional int64 end_centiseconds = 6;
+  // Native voice-length diagnostic, only when token timing was computed.
+  optional float voice_length = 7;
 }
 
 // Final stream accounting; downstream processing drains before successful closure.

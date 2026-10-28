@@ -8,7 +8,8 @@ bounded in-memory hydration, checksums, lifecycle events and native FFmpeg
 demux/audio decoding. Configured ingress routes audio through fixed or VAD-based
 windows to a separate native Whisper worker and publishes provisional hypotheses.
 The `Pull` RPC reads permitted HTTP sources through the same pipeline. Cross-window
-transcript reconciliation and finalization remain pending.
+transcript reconciliation is tested as a standalone component; streaming revision
+publication and hydration are not wired yet.
 The media path calls native libraries with no JSON bridge, shell-based media
 processing, or request-file writes.
 
@@ -24,7 +25,7 @@ The native CPU Whisper adapter is built by default (`MEDIA_BUILD_SPEECH=OFF`
 omits it). Its source is pinned by commit and archive checksum. It loads model
 bytes in memory, fingerprints the exact weights, and returns native segment
 text, token IDs, probabilities, language and timestamps. Adapter results remain
-provisional: cross-window reconciliation and finalization remain pending.
+provisional until ingress integration of the standalone reconciler is complete.
 The separate `SpeechWorkerService.Transcribe` RPC invokes this adapter and is
 called by configured media ingress.
 
@@ -35,6 +36,17 @@ JFK WAV fixture from the pinned upstream source, checks recognizable reference
 phrases and native metadata, and tests cancellation and model-ID rejection.
 The test is not registered without a model path; ordinary test success does
 not imply model qualification. Model assets are never downloaded by a request.
+
+The standalone reconciler keeps a bounded provisional tail and joins overlapping
+lexical tokens using text and source-time evidence. It emits stable segment IDs
+with increasing revisions, preserves competing text as `UNRESOLVED` when a join
+is ambiguous, and stops after validation or delivery failure. Raw hypotheses
+remain separate from these derived revisions. `reconcile_tests` covers repeated
+words, partial-word repair, ambiguous joins, UTF-8 token boundaries, track
+isolation and failed delivery. With `MEDIA_TEST_MODEL` set,
+`speech_boundary_reference` checks the exact reference word sequence across
+four overlapping native inference windows. This is one clean English recording,
+not qualification of arbitrary accents, languages, noise or overlap.
 
 Real VAD qualification additionally uses `-DMEDIA_TEST_VAD_MODEL=/path/to/model.bin`
 and `ctest --test-dir build -R vad_tests --output-on-failure`. The currently

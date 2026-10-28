@@ -98,6 +98,16 @@ std::vector<pb::TranscriptSegment> SpeechModel::infer(const SpeechWindow& window
       token->set_token_id(native.id);
       token->set_text(whisper_full_get_token_text_from_state(impl_->context, impl_->state, i, t));
       token->set_probability(native.p);
+      token->set_kind(native.id < whisper_token_eot(impl_->context) ? pb::SPEECH_TOKEN_KIND_TEXT : pb::SPEECH_TOKEN_KIND_CONTROL);
+      auto* details = token->mutable_whisper();
+      details->set_timestamp_token_id(native.tid);
+      details->set_log_probability(native.plog);
+      details->set_timestamp_probability(native.pt);
+      details->set_timestamp_probability_sum(native.ptsum);
+      if (options.word_timestamps()) {
+        details->set_start_centiseconds(native.t0); details->set_end_centiseconds(native.t1);
+        details->set_voice_length(native.vlen);
+      }
       if (options.word_timestamps() && native.t0 >= 0 && native.t1 >= native.t0) {
         token->set_start_us(base + native.t0 * 10000);
         token->set_end_us(base + native.t1 * 10000);
