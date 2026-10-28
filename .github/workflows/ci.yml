@@ -28,3 +28,7 @@ jobs:
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: sh scripts/ci-native.sh
+      - name: Fetch checksum-pinned qualification weights
+        run: sh scripts/fetch-test-models.sh build/qualification-models
+      - name: Qualify real speech and translation on the native CPU
+        run: sh scripts/ci-models.sh local/whisper-grpc:ci-builder-${{ matrix.arch }} build/qualification-models

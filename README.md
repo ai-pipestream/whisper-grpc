@@ -93,10 +93,26 @@ The native CPU CI matrix uses separate AMD64 and ARM64 runners without QEMU.
 Run `sh scripts/ci-native.sh` locally to perform the same image build and live
 runtime wire tests. It checks the host, Docker daemon and image architectures,
 runs the model-independent tests in the build stage, then exercises the runtime
-as UID 65532 with a read-only filesystem and no mounts. Model-backed inference
-and translation qualification remain separate; a green image job does not prove
-model accuracy. The workflow must run on each architecture before claiming that
-architecture is verified.
+as UID 65532 with a read-only filesystem and no mounts. The workflow must run on
+each architecture before claiming that architecture is verified.
+
+Each native CI job then fetches revision-pinned, SHA-256-checked tiny English,
+multilingual base and Silero models and runs six model-backed executables:
+VAD, overlap reconciliation, worker inference, pipeline cancellation, the full
+audio/video speech pipeline, and Spanish transcription/English translation.
+The last test is a functional gate on one attributed human recording, not a
+broad model accuracy benchmark. To run this qualification locally after the
+native image build:
+
+```sh
+sh scripts/fetch-test-models.sh build/qualification-models
+sh scripts/ci-models.sh local/whisper-grpc:ci-builder-amd64 build/qualification-models
+```
+
+Use `ci-builder-arm64` after a native ARM build. The scripts are explicit test
+setup only. Model files remain outside images and are mounted read-only during
+qualification. Services never fetch models or run these scripts. The reference
+JFK recording is supplied by the pinned whisper.cpp archive and checked by hash.
 
 Install a C++20 compiler, CMake, gRPC C++ (including the reflection library
 and protoc plugin), protobuf, OpenSSL and FFmpeg development packages
