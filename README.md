@@ -114,6 +114,30 @@ setup only. Model files remain outside images and are mounted read-only during
 qualification. Services never fetch models or run these scripts. The reference
 JFK recording is supplied by the pinned whisper.cpp archive and checked by hash.
 
+CI also runs `scripts/ci-worker-runtime.sh RUNTIME_IMAGE BUILDER_IMAGE ASSET_DIRECTORY`
+to verify real inference, overload handling and lifecycle behavior against the
+packaged worker. The worker runs as UID 65532 with a read-only filesystem and
+one read-only model mount; the builder supplies only the gRPC test client.
+
+## Image publication
+
+`.github/workflows/publish.yml` runs qualification for pull requests and pushes
+to main. For the canonical GitHub repository, a successful main push publishes
+`pipestreamai/whisper-grpc:latest` and `:sha-<full-commit>`. Manual dispatch tests
+by default; its `publish` option only publishes when dispatched on main. Both
+native architecture jobs must pass the runtime and model gates before release
+tags are created. Each job uploads the digest of its tested image; the final
+job verifies both architectures and combines those digests without rebuilding.
+An older run skips publication if main has advanced. Qualification run tags
+are separate from release tags. Models are never included in published images.
+
+Publication needs the organization `DOCKER_USER` and `DOCKER_TOKEN` secrets
+and Docker Hub access to `pipestreamai/whisper-grpc`. Forgejo remains canonical;
+the workflow must reach GitHub through the approved mirror workflow. These
+files prepare publication but do not by themselves prove that images have been
+published. Run `sh tests/release_tests.sh` to check manifest rejection gates
+locally with a fake Docker CLI and no registry writes.
+
 Install a C++20 compiler, CMake, gRPC C++ (including the reflection library
 and protoc plugin), protobuf, OpenSSL and FFmpeg development packages
 (`libavformat`, `libavcodec`, `libavutil`, `libswresample`) plus libcurl development

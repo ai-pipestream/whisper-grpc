@@ -1,0 +1,101 @@
+name: native CPU qualification and publishing
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the qualified main commit to Docker Hub
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whisper-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: CPU ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify manifest publication gates without a registry
+        run: sh tests/release_tests.sh
+      - name: Build and exercise the native runtime
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: sh scripts/ci-native.sh
+      - name: Fetch checksum-pinned qualification weights
+        run: sh scripts/fetch-test-models.sh build/qualification-models
+      - name: Qualify real speech and translation on the native CPU
+        run: sh scripts/ci-models.sh local/whisper-grpc:ci-builder-${{ matrix.arch }} build/qualification-models
+      - name: Qualify the packaged worker with real inference
+        run: sh scripts/ci-worker-runtime.sh local/whisper-grpc:ci-runtime-${{ matrix.arch }} local/whisper-grpc:ci-builder-${{ matrix.arch }} build/qualification-models
+      - name: Log in to Docker Hub
+        if: github.repository == 'ai-pipestream/whisper-grpc' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.publish)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Push the tested native image and record its digest
+        if: github.repository == 'ai-pipestream/whisper-grpc' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.publish)
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          remote="pipestreamai/whisper-grpc:run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          docker tag "local/whisper-grpc:ci-runtime-${ARCH}" "$remote"
+          docker push "$remote"
+          mkdir -p digests
+          docker image inspect --format '{{index .RepoDigests 0}}' "$remote" > "digests/${ARCH}.txt"
+          grep -Eq '^pipestreamai/whisper-grpc@sha256:[0-9a-f]{64}$' "digests/${ARCH}.txt"
+      - name: Save the qualified digest
+        if: github.repository == 'ai-pipestream/whisper-grpc' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.publish)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: native
+    if: github.repository == 'ai-pipestream/whisper-grpc' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.publish)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Publish both qualified architectures
+        run: |
+          set -euo pipefail
+          # An older queued run must not move latest behind main.
+          current=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current" != "$GITHUB_SHA" ]; then
+            echo 'Main has advanced; leaving release tags unchanged.'
+            exit 0
+          fi
+          sh scripts/publish-manifest.sh "$GITHUB_SHA" digests/amd64.txt digests/arm64.txt
