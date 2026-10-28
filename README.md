@@ -89,6 +89,33 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 ## Build and test
 
+### Alternative native speech backend qualification
+
+The pinned whisper.cpp source includes the native Parakeet C API. An opt-in
+`parakeet_probe` target checks buffer-based model loading, cancellation recovery, reference transcription
+and native token metadata. This is qualification tooling, not an implemented
+gRPC backend: service discovery continues to advertise only the loaded Whisper
+model. Parakeet transcription must not be advertised as translation support.
+
+Candidate weights: `ggml-parakeet-tdt-0.6b-v3-q8_0.bin` from
+[ggml-org/parakeet-GGUF at revision 35156454d1a39de06863303dd209fd2bed6ee079](https://huggingface.co/ggml-org/parakeet-GGUF/tree/35156454d1a39de06863303dd209fd2bed6ee079),
+SHA-256 `4d64e9e96c2792186d072fde0034df0ad670cf680a2f53069052ead827fd600e`.
+The original [NVIDIA Parakeet TDT 0.6B v3 model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+declares CC BY 4.0; the conversion repository labels itself MIT. Preserve NVIDIA
+attribution and the original model terms for the weights, independently of
+library or conversion-code licenses. Weights are not bundled or redistributed.
+This pinned Q8 candidate passed the native AMD64 probe, including cancellation
+followed by reuse of the same state and the exact English reference words.
+This does not qualify other recordings, languages, ARM execution or a gRPC adapter.
+
+```sh
+cmake -S . -B build
+cmake --build build --target parakeet_probe -j2
+./build/parakeet_probe /path/to/ggml-parakeet-tdt-0.6b-v3-q8_0.bin /path/to/jfk.wav
+```
+
+### Native image and Whisper qualification
+
 The native CPU CI matrix uses separate AMD64 and ARM64 runners without QEMU.
 Run `sh scripts/ci-native.sh` locally to perform the same image build and live
 runtime wire tests. It checks the host, Docker daemon and image architectures,
@@ -216,7 +243,8 @@ The worker listens on loopback port 50073, with the weights mounted read-only.
 It accepts up to 32 open track/task RPCs per instance, with one inference slot.
 Concurrent inference requests beyond that slot return RESOURCE_EXHAUSTED,
 without an unbounded model queue. Clients must set deadlines and close unused
-streams; idle-stream expiry and a larger model pool are not implemented yet.
+streams. Input-idle expiry defaults to 120 seconds as described above; a larger
+model pool is not implemented yet.
 Translation requires multilingual Whisper weights. English-only `.en` models
 reject translation requests before the worker handshake; they cannot produce
 results labeled as translations. With no language hint, English-only weights
