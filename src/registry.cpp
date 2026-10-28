@@ -133,6 +133,7 @@ pb::StreamEvent Registry::publish(const std::string& id, Stream& stream, pb::Str
   auto* cursor = event.mutable_cursor();
   cursor->set_server_epoch(epoch_);
   cursor->set_stream_id(id);
+  cursor->set_stream_incarnation(stream.incarnation);
   cursor->set_event_sequence(++stream.sequence);
   if (!event.has_producer()) *event.mutable_producer() = stream.producer;
   const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -175,9 +176,17 @@ pb::StreamEvent Registry::open(const pb::OpenStream& request, bool speech_enable
   const auto id = request.stream_id().empty() ? uuid() : request.stream_id();
   require(valid_uuid(id), grpc::StatusCode::INVALID_ARGUMENT, "stream_id must be a non-nil lowercase UUID");
   std::lock_guard lock(mutex_);
-  require(!streams_.contains(id), grpc::StatusCode::ALREADY_EXISTS, "stream UUID already used in this epoch");
+  require(!streams_.contains(id), grpc::StatusCode::ALREADY_EXISTS, "stream UUID is active or retained");
+  if (streams_.size() >= limits_.max_streams) {
+    auto oldest = streams_.end();
+    for (auto candidate = streams_.begin(); candidate != streams_.end(); ++candidate)
+      if (candidate->second.closed && (oldest == streams_.end() || candidate->second.closed_at < oldest->second.closed_at))
+        oldest = candidate;
+    if (oldest != streams_.end()) streams_.erase(oldest);
+  }
   require(streams_.size() < limits_.max_streams, grpc::StatusCode::RESOURCE_EXHAUSTED, "registry stream limit reached");
   auto& stream = streams_[id];
+  stream.incarnation = uuid();
   stream.producer = producer_;
   pb::OpenStream processing;
   if (request.has_decode()) *processing.mutable_decode() = request.decode();
@@ -212,6 +221,7 @@ pb::StreamEvent Registry::close(const std::string& id, const pb::StreamClosed& c
   require(it != streams_.end(), grpc::StatusCode::NOT_FOUND, "unknown stream");
   require(!it->second.closed, grpc::StatusCode::FAILED_PRECONDITION, "stream is already closed");
   it->second.closed = true;
+  it->second.closed_at = std::chrono::steady_clock::now();
   *it->second.snapshot.mutable_closed() = closed;
   pb::StreamEvent event;
   *event.mutable_closed() = closed;
@@ -293,6 +303,8 @@ std::shared_ptr<Subscription> Registry::subscribe(const pb::SubscribeRequest& re
     require(sub->accepts(cursor.stream_id()), grpc::StatusCode::INVALID_ARGUMENT, "cursor outside stream selection");
     auto it = streams_.find(cursor.stream_id());
     require(it != streams_.end(), grpc::StatusCode::OUT_OF_RANGE, "replay stream unavailable");
+    require(cursor.stream_incarnation() == it->second.incarnation,
+            grpc::StatusCode::OUT_OF_RANGE, "replay stream incarnation unavailable or missing");
     require(cursor.event_sequence() <= it->second.sequence, grpc::StatusCode::OUT_OF_RANGE, "cursor ahead of stream");
     require(cursor.event_sequence() >= it->second.snapshot.first_retained_sequence() - 1, grpc::StatusCode::OUT_OF_RANGE, "requested history evicted");
     require(after.emplace(cursor.stream_id(), cursor.event_sequence()).second, grpc::StatusCode::INVALID_ARGUMENT, "duplicate replay cursor");

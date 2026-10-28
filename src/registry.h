@@ -80,6 +80,8 @@ class Registry {
     size_t history_bytes = 0;
     uint64_t sequence = 0;
     bool closed = false;
+    std::string incarnation;
+    std::chrono::steady_clock::time_point closed_at;
   };
   pb::StreamEvent publish(const std::string& id, Stream& stream, pb::StreamEvent event);
   Limits limits_;

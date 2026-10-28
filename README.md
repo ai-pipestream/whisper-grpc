@@ -186,11 +186,22 @@ checks gRPC health, then removes the container. Its shell code is test tooling,
 not part of request processing.
 
 Limits are currently 256 KiB per source chunk, 1 MiB history per stream,
-4 MiB queued data per subscriber, 64 registered streams per server epoch,
+4 MiB queued data per subscriber, 64 active or retained streams,
 and 64 simultaneous subscribers. Budgets charge serialized size plus an
-allowance per queue entry; they are not exact RSS limits. Closed streams
-currently consume registry slots until restart. Automatic history expiry,
-configurable quotas and long-running registry lifecycle remain follow-up work.
+allowance per queue entry; they are not exact RSS limits. When opening a new
+stream at capacity, the oldest closed stream is evicted. Active streams are
+never evicted; if all slots are active, opening fails with `RESOURCE_EXHAUSTED`.
+Closed streams remain hydratable until capacity pressure evicts them. Time-based
+expiry and configurable quotas remain follow-up work.
+
+A UUID still present in the registry cannot be opened twice. After eviction,
+a caller may reopen that UUID with a new `stream_incarnation`. Consumers must
+use `(server_epoch, stream_id, stream_incarnation, event_sequence)` as event
+identity and return the complete cursor for replay. Missing or stale
+incarnations fail with `OUT_OF_RANGE`, including cursors from older clients
+that discard the new field. UUID subscriptions continue following future
+incarnations. Already queued events retain their original incarnation and are
+not rewritten or removed by registry eviction.
 
 The integration test uses a real loopback gRPC server. It requires the server
 to return a chunk before the client sends its finish message, reconstructs

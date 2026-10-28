@@ -159,6 +159,46 @@ void subscriber_backpressure_isolation() {
   check(slow->status().error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED, "slow subscriber failed silently");
 }
 
+void closed_stream_reclamation() {
+  media::Limits limits; limits.max_streams = 2;
+  media::Registry registry(limits);
+  const auto active = registry.open(open_request());
+  const auto old = registry.open(open_request());
+  const auto old_id = old.cursor().stream_id();
+  auto listener = registry.subscribe({});
+  pb::SubscribeRequest selected; selected.add_stream_ids(old_id);
+  auto delayed = registry.subscribe(selected);
+  registry.close(old_id, {});
+  check(next(listener).event().has_closed(), "closed stream not delivered");
+  fails(grpc::StatusCode::ALREADY_EXISTS, [&] {registry.open(open_request(old_id));});
+  pb::SubscribeRequest hydration; hydration.add_stream_ids(old_id); hydration.mutable_hydration()->set_metadata(true);
+  auto retained = registry.subscribe(hydration); next(retained);
+  check(next(retained).snapshot().has_closed(), "closed state not retained before capacity pressure");
+  for (int i=0; i<20; ++i) {
+    const auto opened = registry.open(open_request());
+    check(next(listener).event().cursor().SerializeAsString()==opened.cursor().SerializeAsString(), "new stream not delivered after reclamation");
+    registry.close(opened.cursor().stream_id(), {}); next(listener);
+  }
+  const auto reopened = registry.open(open_request(old_id)); next(listener);
+  check(reopened.cursor().stream_incarnation()!=old.cursor().stream_incarnation(), "reopened UUID reused incarnation");
+  const auto queued_old = next(delayed).event();
+  const auto queued_new = next(delayed).event();
+  check(queued_old.has_closed() && queued_old.cursor().stream_incarnation()==old.cursor().stream_incarnation() &&
+        queued_new.has_opened() && queued_new.cursor().stream_incarnation()==reopened.cursor().stream_incarnation(),
+        "eviction changed queued identity or stopped future UUID subscription");
+  pb::SubscribeRequest replay; replay.add_stream_ids(old_id); replay.mutable_hydration()->set_retained_events(true);
+  *replay.mutable_hydration()->add_after() = old.cursor();
+  fails(grpc::StatusCode::OUT_OF_RANGE, [&] {registry.subscribe(replay);});
+  *replay.mutable_hydration()->mutable_after(0) = reopened.cursor();
+  auto valid = registry.subscribe(replay);
+  check(next(valid).has_snapshot_begin() && next(valid).has_snapshot_end(), "fresh incarnation did not resume");
+  replay.mutable_hydration()->mutable_after(0)->clear_stream_incarnation();
+  fails(grpc::StatusCode::OUT_OF_RANGE, [&] {registry.subscribe(replay);});
+  registry.source(active.cursor().stream_id(), chunk(1,"alive"));
+  check(next(listener).event().source().data()=="alive", "reclamation removed active stream");
+  fails(grpc::StatusCode::RESOURCE_EXHAUSTED, [&] {registry.open(open_request());});
+}
+
 void transcript_revisions() {
   media::Limits limits; limits.retention_bytes = 4096;
   media::Registry registry(limits);
@@ -448,6 +488,7 @@ int main() {
     uuid_selection_and_future_streams();
     snapshot_live_atomicity();
     transcript_revisions();
+    closed_stream_reclamation();
     replay_eviction_and_filtering();
     subscriber_backpressure_isolation();
     bounded_registry_and_capabilities();

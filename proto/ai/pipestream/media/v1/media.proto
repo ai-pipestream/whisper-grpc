@@ -104,10 +104,13 @@ message SubscribeResponse {
 message Cursor {
   // UUID assigned on server startup; changes on restart.
   string server_epoch = 1;
-  // UUID for one input stream; never reused during this epoch.
+  // Subscription UUID. A closed UUID can be reopened after its state is evicted.
   string stream_id = 2;
   // Monotonic per-stream event number, beginning at one.
   uint64 event_sequence = 3;
+  // Unique opening incarnation. Required on replay cursors; prevents a reopened
+  // caller UUID from aliasing an older stream's history.
+  string stream_incarnation = 4;
 }
 
 // Beginning of an atomic hydration-to-live subscription.

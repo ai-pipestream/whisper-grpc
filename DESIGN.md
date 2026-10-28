@@ -120,8 +120,10 @@ A machine runs one authoritative stream registry; multiple service processes
 publish into it. A global subscription is not automatically fleet-wide.
 Explicit unknown UUIDs are future subscriptions, not typos the server repairs.
 
-Each stream has a unique UUID. Each registry incarnation has a server epoch.
-An event's identity is `(server_epoch, stream_id, event_sequence)`. Source
+Each active or retained stream has a unique UUID. Each opening also gets a
+unique stream incarnation; a caller UUID can be reopened after closed-state
+eviction. Each registry incarnation has a server epoch. An event's identity is
+`(server_epoch, stream_id, stream_incarnation, event_sequence)`. Source
 chunk numbering, decoded audio chunk numbering and event numbering are
 different counters. Payload filters leave gaps in event numbers by design.
 
