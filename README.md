@@ -21,8 +21,8 @@ chunks. Their combined tests verify sample coverage and pause selection on
 reference speech and silence, including live ingress routing. This does not
 establish accuracy on arbitrary recordings or music.
 
-The native CPU Whisper adapter is built by default (`MEDIA_BUILD_SPEECH=OFF`
-omits it). Its source is pinned by commit and archive checksum. It loads model
+The native CPU Whisper and Parakeet adapters are built by default
+(`MEDIA_BUILD_SPEECH=OFF` omits both). Its source is pinned by commit and archive checksum. It loads model
 bytes in memory, fingerprints the exact weights, and returns native segment
 text, token IDs, probabilities, language and timestamps. Adapter results remain
 provisional; ingress publishes separately reconciled revisions.
@@ -94,12 +94,30 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 ### Alternative native speech backend qualification
 
-The pinned whisper.cpp source includes the native Parakeet C API. An opt-in
-`parakeet_probe` target checks buffer-based model loading, cancellation recovery, reference transcription,
-native token metadata, native detokenization and typed transcript reconciliation.
-This is qualification tooling, not an implemented
-gRPC backend: service discovery continues to advertise only the loaded Whisper
-model. Parakeet transcription must not be advertised as translation support.
+The worker supports the native Parakeet C API with `WHISPER_BACKEND=parakeet`.
+Set `WHISPER_MODEL_PATH` to Parakeet weights and set `WHISPER_MODEL_ID` to the
+ID callers will request. `WHISPER_BACKEND=whisper` remains the default. Both
+Compose entry points forward this option. Weights are loaded through the native
+buffer API, and inference runs in memory on CPU.
+
+Parakeet accepts transcription only. Nonempty language hints and translation
+requests fail with `INVALID_ARGUMENT` before the opening handshake. Discovery
+reports its typed backend, one supported task, and no language reporting or hint
+support. `multilingual_known=false` because the native model API does not expose
+that property. Do not interpret the legacy `multilingual` field when the
+capability is unknown. The service does not infer it from an operator-supplied
+model ID. Transcript
+language strings remain empty rather than inventing a detected language.
+Tokens retain native duration indices/values, frame indices, probabilities,
+word-start markers and centisecond offsets in `ParakeetTokenMetadata`, alongside
+native token bytes and their detokenized contributions.
+
+Configure `-DMEDIA_TEST_PARAKEET_MODEL=/absolute/path/to/model.bin` to register
+`parakeet_tests`. It exercises native cancellation and callback exception
+recovery, nonfinite PCM rejection, real gRPC discovery, unsupported option
+rejection, handshake, inference before finish, native metadata, reconciliation,
+reference words and close accounting. The separate opt-in `parakeet_probe`
+target tests the underlying native API independently of the service adapter.
 
 Candidate weights: `ggml-parakeet-tdt-0.6b-v3-q8_0.bin` from
 [ggml-org/parakeet-GGUF at revision 35156454d1a39de06863303dd209fd2bed6ee079](https://huggingface.co/ggml-org/parakeet-GGUF/tree/35156454d1a39de06863303dd209fd2bed6ee079),
@@ -110,7 +128,8 @@ attribution and the original model terms for the weights, independently of
 library or conversion-code licenses. Weights are not bundled or redistributed.
 This pinned Q8 candidate passed the native AMD64 probe, including cancellation
 followed by reuse of the same state and the exact English reference words.
-This does not qualify other recordings, languages, ARM execution or a gRPC adapter.
+This does not qualify other recordings, languages or ARM execution. The service
+adapter requires the separate `parakeet_tests` gate above.
 
 ```sh
 cmake -S . -B build

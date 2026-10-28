@@ -1,4 +1,5 @@
 #include "worker.h"
+#include "parakeet_model.h"
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/health_check_service_interface.h>
@@ -13,6 +14,9 @@ int main() {
     const char* path = std::getenv("WHISPER_MODEL_PATH");
     const char* id = std::getenv("WHISPER_MODEL_ID");
     if (!path || !id || !*id) throw std::runtime_error("WHISPER_MODEL_PATH and WHISPER_MODEL_ID are required");
+    const char* backend_raw = std::getenv("WHISPER_BACKEND");
+    const std::string_view backend = backend_raw ? backend_raw : "whisper";
+    if (backend != "whisper" && backend != "parakeet") throw std::runtime_error("WHISPER_BACKEND must be whisper or parakeet");
     int threads = 4;
     int idle_seconds = 120;
     if (const char* raw = std::getenv("WHISPER_WORKER_INPUT_IDLE_SECONDS")) {
@@ -34,10 +38,12 @@ int main() {
     std::string weights(static_cast<size_t>(length), '\0');
     file.seekg(0);
     if (!file.read(weights.data(), length)) throw std::runtime_error("cannot read model weights");
-    media::SpeechModel model(weights, id, threads);
+    std::unique_ptr<media::SpeechBackend> model;
+    if (backend == "parakeet") model = std::make_unique<media::ParakeetModel>(weights, id, threads);
+    else model = std::make_unique<media::SpeechModel>(weights, id, threads);
     std::string().swap(weights);
     const char* machine = std::getenv("WHISPER_MACHINE_ID");
-    media::SpeechWorker service(model, machine ? machine : "", std::chrono::seconds(idle_seconds));
+    media::SpeechWorker service(*model, machine ? machine : "", std::chrono::seconds(idle_seconds));
     const char* address = std::getenv("WHISPER_WORKER_LISTEN");
     if (!address) address = "127.0.0.1:50073";
     grpc::EnableDefaultHealthCheckService(true);

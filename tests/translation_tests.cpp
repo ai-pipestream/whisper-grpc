@@ -47,7 +47,8 @@ int main(int argc, char** argv) {
     grpc::ClientContext info_context;
     info_context.set_deadline(std::chrono::system_clock::now()+std::chrono::seconds(5));
     pb::GetModelInfoResponse info;
-    check(stub->GetModelInfo(&info_context, {}, &info).ok() && info.multilingual() && info.tasks_size()==2 &&
+    check(stub->GetModelInfo(&info_context, {}, &info).ok() && info.multilingual() && info.multilingual_known() && info.accepts_language_hint() &&
+          info.reports_language() && info.backend()==pb::SPEECH_BACKEND_KIND_WHISPER && info.tasks_size()==2 &&
           info.tasks(0)==pb::SPEECH_TASK_TRANSCRIBE && info.tasks(1)==pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH &&
           info.producer().model_sha256()==model.model_hash(), "multilingual model discovery mismatch");
     for (const auto task : {pb::SPEECH_TASK_TRANSCRIBE, pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH}) {

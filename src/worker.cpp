@@ -31,7 +31,7 @@ class ReadDeadline {
   std::thread thread_;
 };
 }
-SpeechWorker::SpeechWorker(SpeechModel& model, std::string machine_id, std::chrono::milliseconds input_idle_timeout)
+SpeechWorker::SpeechWorker(SpeechBackend& model, std::string machine_id, std::chrono::milliseconds input_idle_timeout)
     : model_(model), input_idle_timeout_(input_idle_timeout) {
   require(input_idle_timeout.count() > 0 && input_idle_timeout <= std::chrono::hours(1), "invalid worker input idle timeout");
   if (machine_id.empty()) machine_id = uuid();
@@ -40,16 +40,21 @@ SpeechWorker::SpeechWorker(SpeechModel& model, std::string machine_id, std::chro
   producer_.set_service("whisper-speech-worker");
   producer_.set_app_version(MEDIA_APP_VERSION);
   producer_.set_build_id(MEDIA_BUILD_ID);
-  producer_.set_library_version(SpeechModel::library_version());
+  producer_.set_library_version(model.engine_version());
   producer_.set_execution_backend("cpu");
   producer_.set_model_id(model.model_id());
   producer_.set_model_sha256(model.model_hash());
 }
 grpc::Status SpeechWorker::GetModelInfo(grpc::ServerContext*, const pb::GetModelInfoRequest*, pb::GetModelInfoResponse* info) {
   *info->mutable_producer() = producer_;
-  info->set_multilingual(model_.multilingual());
+  const auto multilingual = model_.multilingual_capability();
+  info->set_multilingual_known(multilingual.has_value());
+  info->set_multilingual(multilingual.value_or(false));
+  info->set_backend(model_.backend_kind());
+  info->set_accepts_language_hint(model_.supports_language_hint());
+  info->set_reports_language(model_.reports_language());
   info->add_tasks(pb::SPEECH_TASK_TRANSCRIBE);
-  if (model_.multilingual()) info->add_tasks(pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH);
+  if (model_.supports_translation()) info->add_tasks(pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH);
   info->set_max_window_samples(max_window_samples);
   info->set_sample_rate_hz(16000);
   info->set_max_streams(max_streams);

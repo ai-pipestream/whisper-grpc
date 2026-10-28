@@ -23,6 +23,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     environment:
       WHISPER_WORKER_LISTEN: 0.0.0.0:50073
+      WHISPER_BACKEND: ${WHISPER_BACKEND:-whisper}
       WHISPER_MODEL_PATH: /models/model.bin
       WHISPER_MODEL_ID: ${WHISPER_MODEL_ID:-tiny.en}
       WHISPER_THREADS: ${WHISPER_THREADS:-4}

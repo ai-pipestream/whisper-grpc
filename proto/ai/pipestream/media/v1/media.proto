@@ -630,6 +630,8 @@ message SpeechToken {
   // Text contribution after native detokenization. Absent means use text bytes.
   // May be empty or a partial UTF-8 sequence; concatenate before validation.
   optional bytes rendered_text = 8;
+  // Native Parakeet duration, alignment and confidence values.
+  ParakeetTokenMetadata parakeet = 9;
 }
 
 // Semantic role of a model token; control tokens are retained but not rendered.
@@ -658,6 +660,34 @@ message WhisperTokenMetadata {
   optional int64 end_centiseconds = 6;
   // Native voice-length diagnostic, only when token timing was computed.
   optional float voice_length = 7;
+}
+
+// Native parakeet_token_data fields not represented by generic token metadata.
+message ParakeetTokenMetadata {
+  // Index in the model duration vocabulary.
+  int32 duration_index = 1;
+  // Predicted duration value.
+  int32 duration_value = 2;
+  // Native encoder frame index.
+  int32 frame_index = 3;
+  // Native token log probability.
+  float log_probability = 4;
+  // Native window-relative start in centiseconds.
+  int64 start_centiseconds = 5;
+  // Native window-relative end in centiseconds.
+  int64 end_centiseconds = 6;
+  // Native word-boundary marker.
+  bool is_word_start = 7;
+}
+
+// Native speech inference engine, independent of model ID and device.
+enum SpeechBackendKind {
+  // Engine not reported.
+  SPEECH_BACKEND_KIND_UNSPECIFIED = 0;
+  // whisper.cpp Whisper model adapter.
+  SPEECH_BACKEND_KIND_WHISPER = 1;
+  // whisper.cpp Parakeet model adapter.
+  SPEECH_BACKEND_KIND_PARAKEET = 2;
 }
 
 // Final stream accounting; downstream processing drains before successful closure.
@@ -689,7 +719,8 @@ message GetModelInfoRequest {}
 message GetModelInfoResponse {
   // Includes model ID, weights SHA-256, native library and application versions.
   Producer producer = 1;
-  // True for multilingual weights, false for English-only weights.
+  // True for multilingual weights, false for English-only when capability is known.
+  // Consult multilingual_known for backends that cannot inspect this property.
   bool multilingual = 2;
   // Tasks accepted by this loaded model.
   repeated SpeechTask tasks = 3;
@@ -706,6 +737,14 @@ message GetModelInfoResponse {
   // Maximum wait for each incoming message, including open; excludes inference.
   // Expiry cancels the RPC and releases its stream slot.
   uint32 input_idle_timeout_ms = 9;
+  // Native inference engine.
+  SpeechBackendKind backend = 10;
+  // Whether nonempty language hints are accepted.
+  bool accepts_language_hint = 11;
+  // Whether transcript language labels are supplied by the backend.
+  bool reports_language = 12;
+  // Whether multilingual was determined from the loaded model.
+  bool multilingual_known = 13;
 }
 
 // One worker input message; audio windows already contain any intended overlap.

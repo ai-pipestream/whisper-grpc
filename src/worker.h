@@ -5,7 +5,7 @@
 namespace media {
 class SpeechWorker final : public pb::SpeechWorkerService::Service {
  public:
-  SpeechWorker(SpeechModel& model, std::string machine_id = {},
+  SpeechWorker(SpeechBackend& model, std::string machine_id = {},
                std::chrono::milliseconds input_idle_timeout = std::chrono::seconds(120));
   grpc::Status GetModelInfo(grpc::ServerContext*, const pb::GetModelInfoRequest*, pb::GetModelInfoResponse*) override;
   grpc::Status Transcribe(grpc::ServerContext*,
@@ -13,7 +13,7 @@ class SpeechWorker final : public pb::SpeechWorkerService::Service {
  private:
   static constexpr unsigned max_streams = 32;
   static constexpr unsigned max_window_samples = 480000;
-  SpeechModel& model_;
+  SpeechBackend& model_;
   std::chrono::milliseconds input_idle_timeout_;
   pb::Producer producer_;
   std::atomic_flag busy_ = ATOMIC_FLAG_INIT;
