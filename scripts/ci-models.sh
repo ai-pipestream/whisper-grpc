@@ -8,6 +8,7 @@ sha256sum -c - <<'CHECKSUMS'
 921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f  ggml-tiny.en.bin
 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe  ggml-base.bin
 29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf  ggml-silero-v5.1.2.bin
+4d64e9e96c2792186d072fde0034df0ad670cf680a2f53069052ead827fd600e  ggml-parakeet-tdt-0.6b-v3-q8_0.bin
 CHECKSUMS
 docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --mount "type=bind,src=$assets,dst=/models,readonly" "$1" /bin/sh -eu -c '
@@ -21,5 +22,6 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true
   run pipeline_cancellation_tests /models/ggml-tiny.en.bin
   run pipeline_tests /models/ggml-tiny.en.bin /models/ggml-silero-v5.1.2.bin "$fixture"
   run translation_tests /models/ggml-base.bin tests/fixtures/minds14-es-0.wav minds14
-  printf "All six model-backed qualification executables passed\n"
+  run parakeet_tests /models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin "$fixture"
+  printf "All seven model-backed qualification executables passed\n"
   '

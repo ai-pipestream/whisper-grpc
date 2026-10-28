@@ -94,6 +94,12 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 ### Alternative native speech backend qualification
 
+The release workflow gates both native architectures on Parakeet adapter and
+packaged-worker qualification, using checksum-pinned weights. The runtime test
+uses a separate client container, a read-only root filesystem, UID 65532, and
+a read-only model mount. Its external target option is
+`MEDIA_WORKER_TEST_TARGET`, shared with the Whisper qualification client.
+
 The worker supports the native Parakeet C API with `WHISPER_BACKEND=parakeet`.
 Set `WHISPER_MODEL_PATH` to Parakeet weights and set `WHISPER_MODEL_ID` to the
 ID callers will request. `WHISPER_BACKEND=whisper` remains the default. Both
@@ -147,10 +153,11 @@ as UID 65532 with a read-only filesystem and no mounts. The workflow must run on
 each architecture before claiming that architecture is verified.
 
 Each native CI job then fetches revision-pinned, SHA-256-checked tiny English,
-multilingual base and Silero models and runs six model-backed executables:
+multilingual base, Silero and Parakeet models and runs seven model-backed executables:
 VAD, overlap reconciliation, worker inference, pipeline cancellation, the full
-audio/video speech pipeline, and Spanish transcription/English translation.
-The last test is a functional gate on one attributed human recording, not a
+audio/video speech pipeline, Spanish transcription/English translation, and
+Parakeet transcription. The Spanish test is a functional gate on one attributed
+human recording, not a
 broad model accuracy benchmark. To run this qualification locally after the
 native image build:
 
@@ -164,9 +171,10 @@ setup only. Model files remain outside images and are mounted read-only during
 qualification. Services never fetch models or run these scripts. The reference
 JFK recording is supplied by the pinned whisper.cpp archive and checked by hash.
 
-CI also runs `scripts/ci-worker-runtime.sh RUNTIME_IMAGE BUILDER_IMAGE ASSET_DIRECTORY`
-to verify real inference, overload handling and lifecycle behavior against the
-packaged worker. The worker runs as UID 65532 with a read-only filesystem and
+CI also runs `scripts/ci-worker-runtime.sh RUNTIME_IMAGE BUILDER_IMAGE ASSET_DIRECTORY [whisper|parakeet]`
+to verify real inference and lifecycle behavior against both packaged backends.
+The Whisper client additionally tests stream overload; the Parakeet client checks
+its transcription-only capabilities and native token metadata. The worker runs as UID 65532 with a read-only filesystem and
 one read-only model mount; the builder supplies only the gRPC test client.
 
 ## Image publication

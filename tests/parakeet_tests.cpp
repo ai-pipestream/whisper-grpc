@@ -5,6 +5,7 @@
 #include "worker.h"
 #include <grpcpp/grpcpp.h>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <algorithm>
 #include <atomic>
@@ -73,10 +74,14 @@ int main(int argc, char** argv) {
     builder.RegisterService(&worker);
     struct Guard { std::unique_ptr<grpc::Server> server;
       ~Guard(){if(server){server->Shutdown();server->Wait();}}
-    } guard{builder.BuildAndStart()};
-    check(guard.server!=nullptr,"worker did not bind");
+    } guard;
+    const char* external=std::getenv("MEDIA_WORKER_TEST_TARGET");
+    if (!external) {
+      guard.server=builder.BuildAndStart();
+      check(guard.server!=nullptr,"worker did not bind");
+    }
     auto stub=media::pb::SpeechWorkerService::NewStub(grpc::CreateChannel(
-        "127.0.0.1:"+std::to_string(port),grpc::InsecureChannelCredentials()));
+        external ? external : "127.0.0.1:"+std::to_string(port),grpc::InsecureChannelCredentials()));
     grpc::ClientContext discover; discover.set_deadline(std::chrono::system_clock::now()+std::chrono::seconds(5));
     media::pb::GetModelInfoResponse info;
     check(stub->GetModelInfo(&discover,{},&info).ok(),"discovery failed");
