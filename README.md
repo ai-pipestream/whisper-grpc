@@ -16,6 +16,21 @@ timeline discontinuities. It consumes caller-supplied VAD decisions; it is not
 yet connected to a real VAD model or exposed through the service. This is not
 evidence of speech-recognition accuracy or reliable real-world pause detection.
 
+The native CPU Whisper adapter is built by default (`MEDIA_BUILD_SPEECH=OFF`
+omits it). Its source is pinned by commit and archive checksum. It loads model
+bytes in memory, fingerprints the exact weights, and returns native segment
+text, token IDs, probabilities, language and timestamps. Adapter results remain
+provisional: cross-window reconciliation, worker RPC wiring and finalization
+are still pending. It is not yet called by the media server.
+
+To run the separate real-model qualification, configure with
+`-DMEDIA_TEST_MODEL=/absolute/path/to/ggml-tiny.en.bin`, rebuild, then run
+`ctest --test-dir build -R speech_tests --output-on-failure`. This uses the
+JFK WAV fixture from the pinned upstream source, checks recognizable reference
+phrases and native metadata, and tests cancellation and model-ID rejection.
+The test is not registered without a model path; ordinary test success does
+not imply model qualification. Model assets are never downloaded by a request.
+
 See [DESIGN.md](DESIGN.md) for the required behavior and acceptance tests,
 and [media.proto](proto/ai/pipestream/media/v1/media.proto) for the initial
 ingress, subscription, lifecycle, source-byte and speech-result messages.
