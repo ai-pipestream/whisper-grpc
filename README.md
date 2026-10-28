@@ -89,6 +89,15 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 ## Build and test
 
+The native CPU CI matrix uses separate AMD64 and ARM64 runners without QEMU.
+Run `sh scripts/ci-native.sh` locally to perform the same image build and live
+runtime wire tests. It checks the host, Docker daemon and image architectures,
+runs the model-independent tests in the build stage, then exercises the runtime
+as UID 65532 with a read-only filesystem and no mounts. Model-backed inference
+and translation qualification remain separate; a green image job does not prove
+model accuracy. The workflow must run on each architecture before claiming that
+architecture is verified.
+
 Install a C++20 compiler, CMake, gRPC C++ (including the reflection library
 and protoc plugin), protobuf, OpenSSL and FFmpeg development packages
 (`libavformat`, `libavcodec`, `libavutil`, `libswresample`) plus libcurl development
