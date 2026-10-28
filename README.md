@@ -48,6 +48,18 @@ isolation and failed delivery. With `MEDIA_TEST_MODEL` set,
 four overlapping native inference windows. This is one clean English recording,
 not qualification of arbitrary accents, languages, noise or overlap.
 
+Multilingual functional qualification uses
+`-DMEDIA_TEST_MULTILINGUAL_MODEL=/absolute/path/to/ggml-base.bin` and
+`ctest --test-dir build -R translation_tests --output-on-failure`.
+It runs separate Spanish transcription and English translation RPCs on a
+checked-in, attributed MINDS-14 recording. The test checks language metadata,
+model identity, native tokens, close accounting and three reference facts.
+The base model passes this gate but still produces awkward wording (including
+“knowledge account” for a known account). Tiny and base both fail the separate
+synthetic Spanish challenge. See [fixture provenance and limitations](tests/fixtures/README.md)
+for model/audio hashes, licensing and reproduction commands. No accuracy claim
+for other recordings, accents or languages follows from this single case.
+
 Real VAD qualification additionally uses `-DMEDIA_TEST_VAD_MODEL=/path/to/model.bin`
 and `ctest --test-dir build -R vad_tests --output-on-failure`. The currently
 qualified weights are [Silero v5.1.2 in GGML format](https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v5.1.2.bin),
@@ -139,8 +151,8 @@ Translation requires multilingual Whisper weights. English-only `.en` models
 reject translation requests before the worker handshake; they cannot produce
 results labeled as translations. With no language hint, English-only weights
 use English directly; language auto-detection is reserved for multilingual
-weights. Real multilingual translation qualification
-remains outstanding.
+weights. A multilingual base-model gRPC check passes the core facts in one
+human Spanish recording; this is not broad translation-accuracy qualification.
 No request media is saved to disk. `WHISPER_MODEL_ID` defaults to `tiny.en`,
 and `WHISPER_THREADS` defaults to four. The standalone executable uses the
 same settings and defaults to `127.0.0.1:50073`.
