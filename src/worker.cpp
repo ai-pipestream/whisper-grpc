@@ -20,9 +20,21 @@ SpeechWorker::SpeechWorker(SpeechModel& model, std::string machine_id) : model_(
   producer_.set_model_id(model.model_id());
   producer_.set_model_sha256(model.model_hash());
 }
+grpc::Status SpeechWorker::GetModelInfo(grpc::ServerContext*, const pb::GetModelInfoRequest*, pb::GetModelInfoResponse* info) {
+  *info->mutable_producer() = producer_;
+  info->set_multilingual(model_.multilingual());
+  info->add_tasks(pb::SPEECH_TASK_TRANSCRIBE);
+  if (model_.multilingual()) info->add_tasks(pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH);
+  info->set_max_window_samples(max_window_samples);
+  info->set_sample_rate_hz(16000);
+  info->set_max_streams(max_streams);
+  info->set_max_concurrent_inferences(1);
+  info->set_inference_threads(model_.threads());
+  return grpc::Status::OK;
+}
 grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     grpc::ServerReaderWriter<pb::TranscribeResponse, pb::TranscribeRequest>* wire) {
-  if (streams_.fetch_add(1) >= 32) {
+  if (streams_.fetch_add(1) >= max_streams) {
     streams_.fetch_sub(1);
     return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech worker stream limit reached"};
   }
@@ -42,7 +54,7 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     *opened->mutable_producer() = producer_;
     opened->mutable_producer()->set_configuration_sha256(
         sha256(accepted.options().SerializeAsString() + ":threads=" + std::to_string(model_.threads())));
-    opened->set_max_window_samples(480000);
+    opened->set_max_window_samples(max_window_samples);
     const auto producer = opened->producer();
     if (!wire->Write(response)) return {grpc::StatusCode::CANCELLED, "worker handshake disconnected"};
     uint64_t count = 0, end = 0;
@@ -59,7 +71,7 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
       require(!after_end, "audio after end boundary");
       require(count != std::numeric_limits<uint64_t>::max() && input.window_number() == count + 1,
               "noncontiguous worker window number");
-      require(!input.pcm_f32le().empty() && input.pcm_f32le().size() % 4 == 0 && input.pcm_f32le().size() <= 480000 * 4,
+      require(!input.pcm_f32le().empty() && input.pcm_f32le().size() % 4 == 0 && input.pcm_f32le().size() <= max_window_samples * 4,
               "invalid inference PCM size");
       const uint64_t samples = input.pcm_f32le().size() / 4;
       require(input.first_sample() <= UINT64_C(100000000000000), "worker sample position exceeds limit");

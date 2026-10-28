@@ -31,6 +31,20 @@ class Digest {
 };
 }  // namespace
 
+grpc::Status Service::GetServiceInfo(grpc::ServerContext*, const pb::GetServiceInfoRequest*, pb::GetServiceInfoResponse* info) {
+  *info->mutable_producer() = registry_.producer();
+  info->set_server_epoch(registry_.epoch());
+  const auto& limits = registry_.limits();
+  info->set_max_chunk_bytes(limits.max_chunk_bytes);
+  info->set_retention_bytes(limits.retention_bytes);
+  info->set_subscriber_queue_bytes(limits.subscriber_bytes);
+  info->set_max_streams(limits.max_streams);
+  info->set_max_subscribers(limits.max_subscribers);
+  info->set_http_pull_configured(!http_.allowed_origins.empty());
+  info->set_speech_processing_configured(processing_ != nullptr);
+  return grpc::Status::OK;
+}
+
 grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWriter<pb::IngestResponse, pb::IngestRequest>* wire) {
   return process(context, [&](auto* request) { return wire->Read(request); },
                  [&](const auto& response) { return wire->Write(response); });

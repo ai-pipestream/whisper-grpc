@@ -110,6 +110,18 @@ The server binds to `127.0.0.1:50072` by default. Set `WHISPER_MEDIA_LISTEN`
 to override it. `WHISPER_MACHINE_ID` accepts a non-nil lowercase UUID for
 stable machine identity; otherwise identity is generated at startup.
 The server epoch always changes on startup. Health and reflection are enabled.
+
+`MediaService.GetServiceInfo` returns typed instance identity, registry epoch,
+source chunk and retention limits, subscriber queue and stream limits, and
+whether HTTP pulling or speech processing is configured. These flags describe
+configuration, not downstream readiness; each HTTP URL still requires origin
+validation. The optional `UiInfo` field is absent because no web UI is bundled.
+`SpeechWorkerService.GetModelInfo` reports the loaded model ID and weights hash,
+application and native library versions, CPU thread count, input sample rate,
+window and concurrency limits, and supported tasks. English-only weights
+advertise transcription only; multilingual weights also advertise translation
+to English. Discovery does not allocate a stream or run inference and remains
+available when all worker stream slots are occupied.
 The current transport is plaintext and unauthenticated: keep it on loopback
 or behind an authenticated private gateway. Global subscriptions see all
 streams in this server, not other server processes.

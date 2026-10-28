@@ -71,6 +71,7 @@ class Registry {
   const Limits& limits() const { return limits_; }
   const std::string& epoch() const { return epoch_; }
   const std::string& machine_id() const { return producer_.machine_id(); }
+  const pb::Producer& producer() const { return producer_; }
 
  private:
   struct Stream {

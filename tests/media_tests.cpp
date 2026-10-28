@@ -361,6 +361,16 @@ void subscriber_disconnect_isolation() {
 
 void wire_streaming_and_integrity() {
   RunningServer running;
+  grpc::ClientContext info_context;
+  info_context.set_deadline(std::chrono::system_clock::now() + 5s);
+  pb::GetServiceInfoResponse info;
+  check(running.client->GetServiceInfo(&info_context, {}, &info).ok(), "ingress discovery failed");
+  check(media::valid_uuid(info.producer().machine_id()) && media::valid_uuid(info.server_epoch()) &&
+        !info.producer().app_version().empty() && !info.producer().build_id().empty() &&
+        info.max_chunk_bytes() > 0 && info.retention_bytes() > 0 && info.subscriber_queue_bytes() > 0 &&
+        info.max_streams() > 0 && info.max_subscribers() > 0 && !info.has_ui(), "incomplete ingress discovery");
+  if (running.server)
+    check(!info.http_pull_configured() && !info.speech_processing_configured(), "unconfigured feature advertised");
   grpc::ClientContext context;
   context.set_deadline(std::chrono::system_clock::now() + 5s);
   auto stream = running.client->Ingest(&context);
@@ -369,6 +379,10 @@ void wire_streaming_and_integrity() {
   check(stream->Write(request), "open write failed");
   pb::IngestResponse response;
   check(stream->Read(&response) && response.event().has_opened(), "missing handshake before input");
+  check(response.event().producer().machine_id()==info.producer().machine_id() &&
+        response.event().cursor().server_epoch()==info.server_epoch() &&
+        response.event().opened().max_chunk_bytes()==info.max_chunk_bytes() &&
+        response.event().opened().retention_bytes()==info.retention_bytes(), "discovery differs from handshake");
   const auto id = response.event().cursor().stream_id();
   const std::string data("\x00\xff\x01media", 8);
   request.Clear();

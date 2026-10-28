@@ -6,12 +6,51 @@ import "google/protobuf/timestamp.proto";
 
 // Diskless media ingress and machine-scoped event subscriptions.
 service MediaService {
+  // Inspect this ingress instance without creating or subscribing to a stream.
+  rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
   // Open once, send ordered chunks, then explicitly finish; results stream back.
   rpc Ingest(stream IngestRequest) returns (stream IngestResponse);
   // Pull a permitted HTTP source; response EOF produces explicit stream closure.
   rpc Pull(PullRequest) returns (stream PullResponse);
   // Hydrate matching streams at a consistent boundary, then follow live events.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// No stream or model must be opened to discover ingress configuration.
+message GetServiceInfoRequest {}
+
+// Instance identity and configured ingress limits, not downstream readiness.
+message GetServiceInfoResponse {
+  // Same instance identity used on ingress events.
+  Producer producer = 1;
+  // Changes when the in-memory stream registry restarts.
+  string server_epoch = 2;
+  // Maximum accepted source chunk size in bytes.
+  uint64 max_chunk_bytes = 3;
+  // Maximum history bytes retained per stream.
+  uint64 retention_bytes = 4;
+  // Maximum queued bytes per subscriber before that subscriber is disconnected.
+  uint64 subscriber_queue_bytes = 5;
+  // Maximum active plus retained closed streams.
+  uint64 max_streams = 6;
+  // Maximum simultaneously registered subscribers.
+  uint64 max_subscribers = 7;
+  // True when at least one HTTP origin is allowed; individual URLs still require validation.
+  bool http_pull_configured = 8;
+  // True when a speech processor is configured; does not assert worker availability.
+  bool speech_processing_configured = 9;
+  // Optional web UI descriptor. Absent when this deployment has no web UI.
+  UiInfo ui = 10;
+}
+
+// Shared shape used by service UIs across the parser family.
+message UiInfo {
+  // Display title of the service's web UI.
+  string title = 1;
+  // Suggested mount path.
+  string path = 2;
+  // One-line description of the UI.
+  string description = 3;
 }
 
 // HTTP source and optional media/speech processing configuration.
@@ -634,8 +673,33 @@ message StreamClosed {
 
 // Native inference worker. The caller owns VAD, windowing and reconciliation.
 service SpeechWorkerService {
+  // Inspect the loaded native model without allocating a transcription stream.
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
   // Open one track, submit numbered windows, and explicitly finish.
   rpc Transcribe(stream TranscribeRequest) returns (stream TranscribeResponse);
+}
+
+// The worker currently hosts one operator-provisioned model.
+message GetModelInfoRequest {}
+
+// Loaded model identity and capabilities derived from the model itself.
+message GetModelInfoResponse {
+  // Includes model ID, weights SHA-256, native library and application versions.
+  Producer producer = 1;
+  // True for multilingual weights, false for English-only weights.
+  bool multilingual = 2;
+  // Tasks accepted by this loaded model.
+  repeated SpeechTask tasks = 3;
+  // Maximum samples in one inference window.
+  uint32 max_window_samples = 4;
+  // Required mono PCM sample rate.
+  uint32 sample_rate_hz = 5;
+  // Maximum open transcription streams, including idle streams.
+  uint32 max_streams = 6;
+  // Maximum simultaneous inference calls; excess calls fail RESOURCE_EXHAUSTED.
+  uint32 max_concurrent_inferences = 7;
+  // Configured CPU threads per inference.
+  uint32 inference_threads = 8;
 }
 
 // One worker input message; audio windows already contain any intended overlap.

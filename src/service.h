@@ -8,6 +8,7 @@ class Service final : public pb::MediaService::Service {
  public:
   explicit Service(Registry& registry, const ProcessingFactory* processing = nullptr, HttpPolicy http = {})
       : registry_(registry), processing_(processing), http_(std::move(http)) {}
+  grpc::Status GetServiceInfo(grpc::ServerContext*, const pb::GetServiceInfoRequest*, pb::GetServiceInfoResponse*) override;
   grpc::Status Ingest(grpc::ServerContext*, grpc::ServerReaderWriter<pb::IngestResponse, pb::IngestRequest>*) override;
   grpc::Status Subscribe(grpc::ServerContext*, const pb::SubscribeRequest*, grpc::ServerWriter<pb::SubscribeResponse>*) override;
   grpc::Status Pull(grpc::ServerContext*, const pb::PullRequest*, grpc::ServerWriter<pb::PullResponse>*) override;

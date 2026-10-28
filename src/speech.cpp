@@ -33,6 +33,7 @@ SpeechModel::~SpeechModel() = default;
 const std::string& SpeechModel::model_hash() const { return impl_->hash; }
 const std::string& SpeechModel::model_id() const { return impl_->id; }
 int SpeechModel::threads() const { return impl_->threads; }
+bool SpeechModel::multilingual() const { return whisper_is_multilingual(impl_->context); }
 std::string SpeechModel::library_version() { return std::string("whisper.cpp/") + whisper_version(); }
 void SpeechModel::validate_options(const pb::SpeechOptions& options) const {
   if (options.task() == pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH && !whisper_is_multilingual(impl_->context))

@@ -54,6 +54,11 @@ int main(int argc, char** argv) {
     media::SpeechPipelineFactory factory(worker_server.address());
     media::Registry registry; media::Service service(registry, &factory); Server ingress(service);
     auto stub = pb::MediaService::NewStub(grpc::CreateChannel(ingress.address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext info_context;
+    info_context.set_deadline(std::chrono::system_clock::now()+5s);
+    pb::GetServiceInfoResponse ingress_info;
+    check(stub->GetServiceInfo(&info_context, {}, &ingress_info).ok() &&
+          ingress_info.speech_processing_configured(), "configured processor absent from discovery");
     grpc::ClientContext input_context, observer_context;
     input_context.set_deadline(std::chrono::system_clock::now()+10s);
     observer_context.set_deadline(std::chrono::system_clock::now()+10s);
@@ -79,6 +84,16 @@ int main(int argc, char** argv) {
     bool audio = false;
     while (input->Read(&response)) {if (response.event().has_audio()) {audio=true;break;}}
     check(audio, "pipeline never opened its worker before cancellation");
+    {
+      grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now()+5s);
+      pb::GetModelInfoResponse info;
+      check(worker_stub->GetModelInfo(&context, {}, &info).ok(), "discovery unavailable at worker stream capacity");
+      check(!info.multilingual() && info.tasks_size()==1 && info.tasks(0)==pb::SPEECH_TASK_TRANSCRIBE &&
+            info.producer().model_sha256()==model.model_hash() && info.producer().model_id()==model.model_id() &&
+            info.max_streams()==32 && info.max_window_samples()==480000 && info.sample_rate_hz()==16000 &&
+            info.max_concurrent_inferences()==1 && info.inference_threads()==4,
+            "English model discovery does not match loaded worker");
+    }
     {
       grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now()+5s);
       auto overflow = worker_stub->Transcribe(&context); overflow->WritesDone();

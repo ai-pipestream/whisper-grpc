@@ -44,6 +44,12 @@ int main(int argc, char** argv) {
     check(guard.server != nullptr, "translation worker bind failed");
     auto stub = pb::SpeechWorkerService::NewStub(grpc::CreateChannel(
         "127.0.0.1:"+std::to_string(port), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext info_context;
+    info_context.set_deadline(std::chrono::system_clock::now()+std::chrono::seconds(5));
+    pb::GetModelInfoResponse info;
+    check(stub->GetModelInfo(&info_context, {}, &info).ok() && info.multilingual() && info.tasks_size()==2 &&
+          info.tasks(0)==pb::SPEECH_TASK_TRANSCRIBE && info.tasks(1)==pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH &&
+          info.producer().model_sha256()==model.model_hash(), "multilingual model discovery mismatch");
     for (const auto task : {pb::SPEECH_TASK_TRANSCRIBE, pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH}) {
       grpc::ClientContext context;
       context.set_deadline(std::chrono::system_clock::now()+std::chrono::seconds(180));

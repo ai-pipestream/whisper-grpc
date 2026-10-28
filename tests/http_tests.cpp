@@ -147,6 +147,10 @@ int main() {
       } guard{builder.BuildAndStart()};
       check(guard.server != nullptr, "HTTP gRPC server failed to bind");
       auto client = media::pb::MediaService::NewStub(grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+      grpc::ClientContext info_context; info_context.set_deadline(std::chrono::system_clock::now() + 5s);
+      media::pb::GetServiceInfoResponse discovery;
+      check(client->GetServiceInfo(&info_context, {}, &discovery).ok() && discovery.http_pull_configured() &&
+            !discovery.speech_processing_configured(), "HTTP discovery does not match configured ingress");
       grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now() + 10s);
       media::pb::PullRequest request;
       request.mutable_open()->mutable_http()->set_url(http.url);

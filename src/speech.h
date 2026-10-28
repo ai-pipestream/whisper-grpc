@@ -21,6 +21,7 @@ class SpeechModel {
   const std::string& model_hash() const;
   const std::string& model_id() const;
   int threads() const;
+  bool multilingual() const;
   static std::string library_version();
  private:
   struct Impl;
