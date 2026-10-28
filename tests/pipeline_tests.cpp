@@ -1,0 +1,117 @@
+#include "pipeline.h"
+#include "service.h"
+#include "worker.h"
+#include <grpcpp/grpcpp.h>
+#include <atomic>
+#include <chrono>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <thread>
+
+using namespace std::chrono_literals;
+namespace pb = media::pb;
+void check(bool ok, const char* why) { if (!ok) throw std::runtime_error(why); }
+std::string read(const char* path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) throw std::runtime_error("pipeline asset missing");
+  return {std::istreambuf_iterator<char>(file), {}};
+}
+struct Server {
+  std::unique_ptr<grpc::Server> server;
+  int port = 0;
+  explicit Server(grpc::Service& service) {
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service); server = builder.BuildAndStart();
+    check(server != nullptr, "pipeline server bind failed");
+  }
+  ~Server() { server->Shutdown(); server->Wait(); }
+  std::string address() const { return "127.0.0.1:" + std::to_string(port); }
+};
+int main(int argc, char** argv) {
+  try {
+    if (argc != 4) throw std::runtime_error("usage: pipeline_tests WHISPER_MODEL VAD_MODEL JFK_WAV");
+    const auto weights = read(argv[1]), vad = read(argv[2]), data = read(argv[3]);
+    media::SpeechModel model(weights, "test-tiny.en", 4);
+    media::SpeechWorker worker(model); Server worker_server(worker);
+    media::SpeechPipelineFactory factory(worker_server.address(), vad);
+    media::Registry registry; media::Service ingress(registry, &factory); Server ingress_server(ingress);
+    auto stub = pb::MediaService::NewStub(grpc::CreateChannel(ingress_server.address(), grpc::InsecureChannelCredentials()));
+    for (bool smart : {false, true}) {
+      grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now() + 90s);
+      auto rpc = stub->Ingest(&context);
+      pb::IngestRequest open;
+      open.mutable_open()->mutable_direct()->set_name("reference.wav");
+      auto* speech = open.mutable_open()->add_speech();
+      speech->set_model_id("test-tiny.en"); speech->set_language("en");
+      auto* w = speech->mutable_windowing(); w->set_window_ms(4000); w->set_overlap_ms(smart ? 500 : 0);
+      w->set_strategy(smart ? pb::CHUNKING_STRATEGY_SPEECH_AWARE : pb::CHUNKING_STRATEGY_FIXED);
+      if (smart) {
+        auto* b = w->mutable_speech_boundary(); b->set_vad_model_id("silero-v5.1.2");
+        b->set_max_window_ms(6000); b->set_min_pause_ms(250); b->set_speech_padding_ms(80);
+        b->set_no_pause_policy(pb::NO_PAUSE_POLICY_SPLIT_WITH_OVERLAP);
+      }
+      check(rpc->Write(open), "ingress speech open failed");
+      pb::IngestResponse response;
+      check(rpc->Read(&response) && response.event().has_opened(), "ingress handshake missing");
+      const auto id = response.event().cursor().stream_id();
+      check(response.event().opened().speech_size() == 1, "speech options not echoed");
+      std::atomic<bool> saw_hypothesis{false}, done{false}, writes_ok{true};
+      std::jthread writer([&] {
+        size_t offset = 0; uint64_t count = 0;
+        const size_t split = data.size() * 3 / 4;
+        auto send_until = [&](size_t end) {
+          while (offset < end) {
+            pb::IngestRequest request;
+            auto* chunk = request.mutable_chunk();
+            const auto n = std::min(size_t(8192), end - offset);
+            chunk->set_chunk_number(++count); chunk->set_byte_offset(offset); chunk->set_data(data.substr(offset, n));
+            if (!rpc->Write(request)) { writes_ok = false; return false; }
+            offset += n;
+          }
+          return true;
+        };
+        if (!send_until(split)) return;
+        const auto deadline = std::chrono::steady_clock::now() + 75s;
+        while (!saw_hypothesis && !done && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(5ms);
+        if (!saw_hypothesis) { writes_ok = false; context.TryCancel(); return; }
+        if (!send_until(data.size())) return;
+        pb::IngestRequest finish;
+        finish.mutable_finish()->set_chunk_count(count); finish.mutable_finish()->set_byte_count(data.size());
+        finish.mutable_finish()->set_sha256(media::sha256(data));
+        if (!rpc->Write(finish)) writes_ok = false;
+        rpc->WritesDone();
+      });
+      std::string source, text;
+      int hypotheses = 0; bool closed = false, evidence_ok = true;
+      while (rpc->Read(&response)) {
+        const auto& event = response.event();
+        if (event.has_source()) source += event.source().data();
+        if (event.has_hypothesis()) {
+          saw_hypothesis = true; ++hypotheses;
+          const auto& h = event.hypothesis();
+          evidence_ok &= event.producer().model_sha256() == model.model_hash() && h.contributors_size() == 1;
+          if (smart) evidence_ok &= h.contributors(0).model_sha256() == media::sha256(vad);
+          for (const auto& segment : h.segments()) { text += segment.text(); evidence_ok &= !segment.final(); }
+        }
+        if (event.has_closed()) closed = event.closed().status_code() == 0 && event.closed().source_sha256() == media::sha256(data);
+      }
+      done = true; writer.join();
+      const auto status = rpc->Finish();
+      if (!status.ok()) std::cerr << "pipeline status: " << status.error_code() << ' ' << status.error_message() << '\n';
+      check(status.ok() && writes_ok && closed, "pipeline did not close successfully");
+      check(source == data && hypotheses >= 2 && evidence_ok, "pipeline source or provenance mismatch");
+      check(text.find("country") != std::string::npos, "pipeline did not recognize reference speech");
+      grpc::ClientContext subscribe_context; subscribe_context.set_deadline(std::chrono::system_clock::now() + 5s);
+      pb::SubscribeRequest subscribe; subscribe.add_stream_ids(id); subscribe.mutable_hydration()->set_metadata(true);
+      auto listener = stub->Subscribe(&subscribe_context, subscribe);
+      pb::SubscribeResponse item;
+      check(listener->Read(&item) && item.has_snapshot_begin(), "speech hydration begin missing");
+      check(listener->Read(&item) && item.has_snapshot(), "speech hydration missing");
+      check(item.snapshot().hypotheses_size() == hypotheses && item.snapshot().has_closed(), "speech results not hydrated");
+      subscribe_context.TryCancel(); while (listener->Read(&item)) {} listener->Finish();
+      std::cout << (smart ? "Smart" : "Fixed") << " ingress -> worker -> hydrated output passed\n";
+    }
+  } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+}

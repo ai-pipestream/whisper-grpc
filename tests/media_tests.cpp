@@ -160,6 +160,34 @@ void subscriber_backpressure_isolation() {
 }
 
 void bounded_registry_and_capabilities() {
+  {
+    media::Limits bounded;
+    bounded.retention_bytes = 2048;
+    media::Registry results(bounded);
+    const auto id = results.open(open_request()).cursor().stream_id();
+    pb::SubscribeRequest filter;
+    filter.add_payload_kinds(pb::PAYLOAD_KIND_HYPOTHESIS);
+    auto live = results.subscribe(filter);
+    for (uint64_t i = 1; i <= 10; ++i) {
+      pb::StreamEvent event;
+      event.mutable_producer()->set_model_id("test-model");
+      event.mutable_producer()->set_model_sha256(std::string(32, 'm'));
+      event.mutable_hypothesis()->set_window_number(i);
+      event.mutable_hypothesis()->add_segments()->set_text(std::string(300, 'x'));
+      results.derived(id, std::move(event), "");
+      check(next(live).event().hypothesis().window_number() == i, "hypothesis subscription filter lost output");
+    }
+    pb::SubscribeRequest request;
+    request.add_stream_ids(id); request.mutable_hydration()->set_metadata(true);
+    auto replay = results.subscribe(request);
+    check(next(replay).has_snapshot_begin(), "hypothesis snapshot begin absent");
+    const auto snapshot = next(replay).snapshot();
+    check(snapshot.result_state_truncated() && snapshot.hypotheses_size() > 0 && snapshot.hypotheses_size() < 10,
+          "hypothesis hydration was not bounded");
+    check(snapshot.ByteSizeLong() <= bounded.retention_bytes, "hypothesis snapshot exceeded retention budget");
+    check(snapshot.hypotheses(snapshot.hypotheses_size() - 1).producer().model_sha256() == std::string(32, 'm'),
+          "hypothesis hydration lost native provenance");
+  }
   // Provenance identifies processing settings, independently of stream identity.
   media::Registry provenance;
   const auto relay = provenance.open(open_request());

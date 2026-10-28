@@ -48,11 +48,23 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
       pb::IngestRequest request;
       if (!wire->Read(&request) || !request.has_open())
         throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "first message must open a stream");
-      const auto opened = registry_.open(request.open());
-      const auto options = request.open().decode();
-      const bool decoding = request.open().has_decode();
+      auto accepted = request.open();
+      if (!accepted.speech().empty()) {
+        if (!processing_) throw Failure(grpc::StatusCode::UNIMPLEMENTED, "speech worker is not configured");
+        processing_->resolve(accepted);
+      }
+      const auto opened = registry_.open(accepted, processing_ != nullptr);
+      auto options = accepted.decode();
+      const bool decoding = accepted.has_decode() || !accepted.speech().empty();
       id = opened.cursor().stream_id();
       send(opened);
+      std::unique_ptr<Processing> processing;
+      if (!accepted.speech().empty()) {
+        processing = processing_->create(id, accepted, *context, [&](pb::StreamEvent event) {
+          send(registry_.derived(id, std::move(event), ""));
+        });
+        options.set_emit_audio(true);
+      }
       std::string buffered;
       size_t offset = 0;
       auto next_chunk = [&]() -> bool {
@@ -93,7 +105,9 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
           offset += size;
           return static_cast<int>(size);
         }, [&](pb::StreamEvent event) {
-          send(registry_.derived(id, std::move(event), library_version));
+          if (event.has_audio() && processing) processing->audio(event.audio());
+          if (!event.has_audio() || accepted.decode().emit_audio())
+            send(registry_.derived(id, std::move(event), library_version));
         }, [&] { return context->IsCancelled(); }, options);
       }
       // Some finite formats stop at their declared data length. Preserve any
@@ -102,6 +116,7 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
       if (!explicit_finish) throw Failure(grpc::StatusCode::CANCELLED, "input ended without FinishStream");
       if (finish.chunk_count() != count || finish.byte_count() != bytes)
         throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "finish accounting mismatch");
+      if (processing) processing->finish();
     } catch (const Failure& error) {
       status = {error.code, error.what()};
     } catch (const std::exception&) {

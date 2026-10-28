@@ -63,13 +63,14 @@ class Subscription {
 class Registry {
  public:
   explicit Registry(Limits limits = {}, std::string machine_id = {});
-  pb::StreamEvent open(const pb::OpenStream& request);
+  pb::StreamEvent open(const pb::OpenStream& request, bool speech_enabled = false);
   pb::StreamEvent source(const std::string& id, const pb::SourceChunk& chunk);
   pb::StreamEvent derived(const std::string& id, pb::StreamEvent event, const std::string& library_version);
   pb::StreamEvent close(const std::string& id, const pb::StreamClosed& closed);
   std::shared_ptr<Subscription> subscribe(const pb::SubscribeRequest& request);
   const Limits& limits() const { return limits_; }
   const std::string& epoch() const { return epoch_; }
+  const std::string& machine_id() const { return producer_.machine_id(); }
 
  private:
   struct Stream {

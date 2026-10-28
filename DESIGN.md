@@ -4,8 +4,8 @@ Status: media implementation in progress. Direct ingestion, subscriptions,
 bounded hydration, source checksums and native FFmpeg demux/audio decoding have
 a C++ implementation and loopback gRPC tests. The sections below describe the
 full target, including work not yet implemented. The separate speech worker
-performs native inference, but ingress chaining, HTTP input, reconciliation
-and real VAD integration remain pending; see README.md for
+performs native inference and ingress chains to it through fixed or real VAD
+windows. HTTP input and reconciliation remain pending; see README.md for
 current format coverage and limits.
 
 ## Required behavior
@@ -27,8 +27,9 @@ The ingress stream can return original media, speech output, or both. Output
 filters must not silently turn off processing requested by other subscribers.
 The subscription contract includes initial container/track/packet descriptors.
 The worker protocol now carries explicit pre-cut windows and provisional
-hypotheses. Ingress integration, transcript hydration and full native metadata
-coverage still need implementation and validation.
+hypotheses. Ingress publishes and hydrates bounded provisional hypotheses;
+final transcript reconciliation and full native metadata coverage still need
+implementation and validation.
 
 ## Speech-aware chunking and optional overlap
 

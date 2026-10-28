@@ -11,5 +11,6 @@ class SpeechWorker final : public pb::SpeechWorkerService::Service {
   SpeechModel& model_;
   pb::Producer producer_;
   std::atomic_flag busy_ = ATOMIC_FLAG_INIT;
+  std::atomic<unsigned> streams_{0};
 };
 }  // namespace media

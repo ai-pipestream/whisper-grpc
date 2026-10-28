@@ -103,13 +103,34 @@ int main(int argc, char** argv) {
             response.opened().producer().configuration_sha256().size() == 32 &&
             response.opened().producer().build_id().size() == 64, "worker provenance incomplete");
       {
+        std::vector<std::unique_ptr<grpc::ClientContext>> contexts;
+        std::vector<std::unique_ptr<grpc::ClientReaderWriter<media::pb::TranscribeRequest, media::pb::TranscribeResponse>>> idle;
+        for (int i = 0; i < 31; ++i) {
+          auto pending = std::make_unique<grpc::ClientContext>();
+          pending->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+          auto call = stub->Transcribe(pending.get());
+          check(call->Write(request), "idle worker track open failed");
+          media::pb::TranscribeResponse opened;
+          check(call->Read(&opened) && opened.has_opened(), "idle tracks consumed inference slot");
+          contexts.push_back(std::move(pending)); idle.push_back(std::move(call));
+        }
         grpc::ClientContext second_context;
         second_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
         auto second = stub->Transcribe(&second_context);
         second->WritesDone();
         media::pb::TranscribeResponse ignored;
         check(!second->Read(&ignored), "overloaded worker accepted a second stream");
-        check(second->Finish().error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED, "worker overload status wrong");
+        const auto overflow_status = second->Finish();
+        if (overflow_status.error_code() != grpc::StatusCode::RESOURCE_EXHAUSTED)
+          std::cerr << "worker overload status: " << overflow_status.error_code() << " " << overflow_status.error_message() << '\n';
+        check(overflow_status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED, "worker overload status wrong");
+        media::pb::TranscribeRequest finish_idle;
+        finish_idle.mutable_finish()->set_window_count(0);
+        for (auto& call : idle) {
+          check(call->Write(finish_idle), "idle track close failed"); call->WritesDone();
+          check(call->Read(&ignored) && ignored.has_closed(), "idle track close absent");
+          check(!call->Read(&ignored) && call->Finish().ok(), "idle track closure failed");
+        }
       }
       request.Clear();
       auto* input = request.mutable_window();

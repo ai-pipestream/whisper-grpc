@@ -74,7 +74,8 @@ std::vector<pb::TranscriptSegment> SpeechModel::infer(const SpeechWindow& window
   if (cancelled()) throw Failure(grpc::StatusCode::CANCELLED, "speech cancelled");
   if (result) throw Failure(grpc::StatusCode::INTERNAL, "native Whisper inference failed");
   std::vector<pb::TranscriptSegment> output;
-  const int64_t base = static_cast<int64_t>(window.first_sample * 1000000 / 16000);
+  const int64_t base = static_cast<int64_t>((window.first_sample / 16000) * 1000000 +
+                                          (window.first_sample % 16000) * 1000000 / 16000);
   const char* language = whisper_lang_str(whisper_full_lang_id_from_state(impl_->state));
   for (int i = 0; i < whisper_full_n_segments_from_state(impl_->state); ++i) {
     auto& segment = output.emplace_back();

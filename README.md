@@ -5,9 +5,10 @@ Typed live audio/video ingestion and speech processing over gRPC.
 **Status: media implementation in progress, not a complete Whisper service.**
 The C++ server implements direct byte-stream ingress, UUID subscriptions,
 bounded in-memory hydration, checksums, lifecycle events and native FFmpeg
-demux/audio decoding. HTTP input and speech requests still fail explicitly
-with UNIMPLEMENTED. A separate native Whisper worker is implemented; ingress
-routing to it and service-level VAD integration remain pending.
+demux/audio decoding. Configured ingress routes audio through fixed or VAD-based
+windows to a separate native Whisper worker and publishes provisional hypotheses.
+HTTP input still fails explicitly with UNIMPLEMENTED. Cross-window transcript
+reconciliation and finalization remain pending.
 The media path calls native libraries with no JSON bridge, shell-based media
 processing, or request-file writes.
 
@@ -16,16 +17,16 @@ confirmed pauses, forced overlap, bounded continuous speech, final flush and
 timeline discontinuities. A native Silero adapter now supplies real VAD
 probabilities, with deterministic 512-sample framing independent of transport
 chunks. Their combined tests verify sample coverage and pause selection on
-reference speech and silence. They are not yet exposed through the media
-service; this does not establish accuracy on arbitrary recordings or music.
+reference speech and silence, including live ingress routing. This does not
+establish accuracy on arbitrary recordings or music.
 
 The native CPU Whisper adapter is built by default (`MEDIA_BUILD_SPEECH=OFF`
 omits it). Its source is pinned by commit and archive checksum. It loads model
 bytes in memory, fingerprints the exact weights, and returns native segment
 text, token IDs, probabilities, language and timestamps. Adapter results remain
 provisional: cross-window reconciliation and finalization remain pending.
-The separate `SpeechWorkerService.Transcribe` RPC invokes this adapter;
-it is not yet called by the media server.
+The separate `SpeechWorkerService.Transcribe` RPC invokes this adapter and is
+called by configured media ingress.
 
 To run the separate real-model qualification, configure with
 `-DMEDIA_TEST_MODEL=/absolute/path/to/ggml-tiny.en.bin`, rebuild, then run
@@ -94,12 +95,14 @@ model file and enable its profile:
 
 ```sh
 WHISPER_MODEL_PATH=/absolute/path/to/ggml-tiny.en.bin \
+  WHISPER_WORKER_TARGET=speech:50073 \
   docker compose --profile speech up --build
 ```
 
 The worker listens on loopback port 50073, with the weights mounted read-only.
-It accepts one active RPC per model instance and returns RESOURCE_EXHAUSTED
-for excess concurrent streams. Clients must set deadlines and close unused
+It accepts up to 32 open track/task RPCs per instance, with one inference slot.
+Concurrent inference requests beyond that slot return RESOURCE_EXHAUSTED,
+without an unbounded model queue. Clients must set deadlines and close unused
 streams; idle-stream expiry and a larger model pool are not implemented yet.
 No request media is saved to disk. `WHISPER_MODEL_ID` defaults to `tiny.en`,
 and `WHISPER_THREADS` defaults to four. The standalone executable uses the
@@ -112,6 +115,32 @@ The worker applies no extra overlap. Its output is an unreconciled hypothesis
 per window; overlapping hypotheses can repeat text. Close means all supplied
 windows completed, not that a final combined transcript exists. Its handshake
 reports the actual model hash, build, native library and settings digest.
+
+Set `WHISPER_WORKER_TARGET` on media ingress to enable speech processing.
+Requests may contain up to four speech tasks and 32 track/task pairs total.
+Fixed windows default to 10 seconds with one second of overlap. To enable
+speech-aware requests on the native media executable, set
+`WHISPER_VAD_MODEL_PATH` to the qualified model file at startup. Container
+deployments must mount that file read-only and set its in-container path;
+the base Compose profile does not mount VAD weights yet. Requests select
+`silero-v5.1.2` and supply pause duration, padding, hard limit and no-pause
+policy. The current detector threshold is 0.5. Resolved options are echoed
+in the opening event. Without a worker target, speech requests fail explicitly.
+
+Ingress publishes `SpeechHypothesis` events with window boundaries, native
+worker identity and upstream window/VAD provenance. These are distinct from
+`TranscriptSegment` revision events: overlapping hypotheses may repeat text
+and remain provisional. Native presentation times are applied when available;
+otherwise timestamps remain on the decoded sample timeline. The latest 16
+hypotheses, further bounded by the stream retention-byte budget, are hydratable;
+eviction sets `result_state_truncated`. Original source bytes remain independent.
+Decoded PCM can feed speech internally without publishing PCM events; set
+`decode.emit_audio` to request those events too.
+
+With both model paths configured in CMake, `pipeline_tests` runs real gRPC
+ingress-to-worker tests in fixed and speech-aware modes, holds back the final
+quarter of the upload until a hypothesis arrives, checks original-byte and
+provenance integrity, and checks closed-stream hypothesis hydration.
 
 To qualify the packaged worker with real inference, run
 `scripts/smoke-worker.sh IMAGE /path/to/ggml-tiny.en.bin /path/to/jfk.wav`
@@ -151,7 +180,7 @@ correctness.
 
 ## Native media output
 
-An absent `OpenStream.decode` selects byte-preserving relay. Set
+Without speech tasks, an absent `OpenStream.decode` selects byte-preserving relay. Set
 `decode.emit_audio` to stream mono 16 kHz float32 little-endian PCM, and/or
 `decode.emit_packets` for original demuxed audio/video/subtitle/data packets.
 An empty `decode.audio_track_ids` selects all audio tracks; an explicit list

@@ -55,6 +55,8 @@ enum PayloadKind {
   PAYLOAD_KIND_MEDIA_INFO = 4;
   // Demuxed compressed packets, including video, audio and subtitle tracks.
   PAYLOAD_KIND_PACKET = 5;
+  // Unreconciled model output, distinct from finalized transcript revisions.
+  PAYLOAD_KIND_HYPOTHESIS = 6;
 }
 
 // Bounded hydration policy; this does not imply durable storage.
@@ -124,6 +126,8 @@ message StreamSnapshot {
   bool result_state_truncated = 7;
   // Most recently observed container and track descriptions.
   MediaInfo media_info = 8;
+  // Bounded most-recent worker hypotheses; these are not a combined transcript.
+  repeated SpeechHypothesis hypotheses = 9;
 }
 
 // Initial input declaration.
@@ -139,7 +143,8 @@ message OpenStream {
   }
   // Requested downstream processing; empty means lossless source relay only.
   repeated SpeechOptions speech = 4;
-  // Optional native demux/decode; absent means original-byte relay only.
+  // Optional native media output projections. Speech requests decode internally
+  // even when this message is absent; original bytes are preserved either way.
   DecodeOptions decode = 5;
 }
 
@@ -157,7 +162,7 @@ message DecodeOptions {
 message DirectSource {
   // User-facing source name, never a server filesystem path.
   string name = 1;
-  // Optional media type hint; validated against the decoder's observations.
+  // Informational media type hint; the native decoder detects actual content.
   string media_type = 2;
 }
 
@@ -313,6 +318,8 @@ message StreamEvent {
     MediaInfo media_info = 9;
     // Compressed packet fragment; original source bytes remain authoritative.
     EncodedPacket packet = 10;
+    // Provisional window-level result; overlapping windows may repeat text.
+    SpeechHypothesis hypothesis = 11;
   }
 }
 
@@ -326,7 +333,7 @@ message StreamOpened {
   uint64 retention_bytes = 3;
   // Resolved, accepted speech tasks.
   repeated SpeechOptions speech = 4;
-  // Accepted native processing options, absent for byte relay only.
+  // Accepted native output projections; speech may also decode audio internally.
   DecodeOptions decode = 5;
 }
 
@@ -634,4 +641,19 @@ message SpeechHypothesis {
   uint32 track_id = 2;
   // Native segments are provisional; the upstream reconciler owns finalization.
   repeated TranscriptSegment segments = 3;
+  // Absolute first sample of the input window on its decoded track.
+  uint64 first_sample = 4;
+  // First sample not included in previous windows.
+  uint64 first_new_sample = 5;
+  // Real input samples, excluding model padding.
+  uint32 sample_count = 6;
+  // Boundary chosen by the windowing stage.
+  InferenceBoundary boundary = 7;
+  // Native worker provenance, retained in hydrated state as well as live events.
+  Producer producer = 8;
+  // Upstream processors contributing window selection, including VAD when used.
+  repeated Producer contributors = 9;
+  // Native presentation time of the first window sample, when known. When
+  // absent, segment times remain relative to the decoded sample timeline.
+  optional int64 presentation_time_us = 10;
 }

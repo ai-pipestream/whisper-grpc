@@ -22,10 +22,11 @@ SpeechWorker::SpeechWorker(SpeechModel& model, std::string machine_id) : model_(
 }
 grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     grpc::ServerReaderWriter<pb::TranscribeResponse, pb::TranscribeRequest>* wire) {
-  // One model slot with no hidden unbounded request queue. A later pool may
-  // increase slots, but a client receives explicit overload in this version.
-  if (busy_.test_and_set()) return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech worker is busy"};
-  struct Release { std::atomic_flag& flag; ~Release() { flag.clear(); } } release{busy_};
+  if (streams_.fetch_add(1) >= 32) {
+    streams_.fetch_sub(1);
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech worker stream limit reached"};
+  }
+  struct Release { std::atomic<unsigned>& streams; ~Release() { streams.fetch_sub(1); } } release{streams_};
   try {
     pb::TranscribeRequest request;
     require(wire->Read(&request) && request.has_open(), "first worker message must open a track");
@@ -42,6 +43,7 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
     opened->mutable_producer()->set_configuration_sha256(
         sha256(accepted.options().SerializeAsString() + ":threads=" + std::to_string(model_.threads())));
     opened->set_max_window_samples(480000);
+    const auto producer = opened->producer();
     if (!wire->Write(response)) return {grpc::StatusCode::CANCELLED, "worker handshake disconnected"};
     uint64_t count = 0, end = 0;
     bool after_discontinuity = false, after_end = false;
@@ -76,10 +78,17 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
         for (int b = 0; b < 4; ++b) bits |= static_cast<uint32_t>(static_cast<unsigned char>(bytes[i+b])) << (8*b);
         window.samples.push_back(std::bit_cast<float>(bits));
       }
-      auto segments = model_.infer(window, accepted.track_id(), accepted.options(), [&] { return context->IsCancelled(); });
+      if (busy_.test_and_set()) return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech inference slot is busy"};
+      auto segments = [&] {
+        struct InferenceRelease { std::atomic_flag& flag; ~InferenceRelease() { flag.clear(); } } slot{busy_};
+        return model_.infer(window, accepted.track_id(), accepted.options(), [&] { return context->IsCancelled(); });
+      }();
       response.Clear();
       auto* hypothesis = response.mutable_hypothesis();
       hypothesis->set_window_number(input.window_number()); hypothesis->set_track_id(accepted.track_id());
+      hypothesis->set_first_sample(input.first_sample()); hypothesis->set_first_new_sample(input.first_new_sample());
+      hypothesis->set_sample_count(samples); hypothesis->set_boundary(input.boundary());
+      *hypothesis->mutable_producer() = producer;
       for (auto& segment : segments) *hypothesis->add_segments() = std::move(segment);
       if (response.ByteSizeLong() > 4 * 1024 * 1024)
         return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech hypothesis exceeds output limit"};
