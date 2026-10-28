@@ -1,0 +1,95 @@
+#include "worker.h"
+#include <bit>
+#include <limits>
+
+namespace media {
+namespace {
+void require(bool ok, const char* reason) {
+  if (!ok) throw Failure(grpc::StatusCode::INVALID_ARGUMENT, reason);
+}
+}
+SpeechWorker::SpeechWorker(SpeechModel& model, std::string machine_id) : model_(model) {
+  if (machine_id.empty()) machine_id = uuid();
+  require(valid_uuid(machine_id), "invalid worker machine UUID");
+  producer_.set_machine_id(machine_id);
+  producer_.set_service("whisper-speech-worker");
+  producer_.set_app_version(MEDIA_APP_VERSION);
+  producer_.set_build_id(MEDIA_BUILD_ID);
+  producer_.set_library_version(SpeechModel::library_version());
+  producer_.set_execution_backend("cpu");
+  producer_.set_model_id(model.model_id());
+  producer_.set_model_sha256(model.model_hash());
+}
+grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
+    grpc::ServerReaderWriter<pb::TranscribeResponse, pb::TranscribeRequest>* wire) {
+  // One model slot with no hidden unbounded request queue. A later pool may
+  // increase slots, but a client receives explicit overload in this version.
+  if (busy_.test_and_set()) return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech worker is busy"};
+  struct Release { std::atomic_flag& flag; ~Release() { flag.clear(); } } release{busy_};
+  try {
+    pb::TranscribeRequest request;
+    require(wire->Read(&request) && request.has_open(), "first worker message must open a track");
+    auto accepted = request.open();
+    require(valid_uuid(accepted.stream_id()), "invalid source stream UUID");
+    require(!accepted.options().has_windowing(), "worker accepts pre-cut windows, not a windowing policy");
+    model_.validate_options(accepted.options());
+    if (accepted.options().task() == pb::SPEECH_TASK_UNSPECIFIED)
+      accepted.mutable_options()->set_task(pb::SPEECH_TASK_TRANSCRIBE);
+    pb::TranscribeResponse response;
+    auto* opened = response.mutable_opened();
+    *opened->mutable_accepted() = accepted;
+    *opened->mutable_producer() = producer_;
+    opened->mutable_producer()->set_configuration_sha256(
+        sha256(accepted.options().SerializeAsString() + ":threads=" + std::to_string(model_.threads())));
+    opened->set_max_window_samples(480000);
+    if (!wire->Write(response)) return {grpc::StatusCode::CANCELLED, "worker handshake disconnected"};
+    uint64_t count = 0, end = 0;
+    bool after_discontinuity = false, after_end = false;
+    while (wire->Read(&request)) {
+      if (request.has_finish()) {
+        require(request.finish().window_count() == count, "worker finish count mismatch");
+        response.Clear(); response.mutable_closed()->set_window_count(count);
+        if (!wire->Write(response)) return {grpc::StatusCode::CANCELLED, "worker close disconnected"};
+        return grpc::Status::OK;
+      }
+      require(request.has_window(), "expected worker window or finish");
+      const auto& input = request.window();
+      require(!after_end, "audio after end boundary");
+      require(count != std::numeric_limits<uint64_t>::max() && input.window_number() == count + 1,
+              "noncontiguous worker window number");
+      require(!input.pcm_f32le().empty() && input.pcm_f32le().size() % 4 == 0 && input.pcm_f32le().size() <= 480000 * 4,
+              "invalid inference PCM size");
+      const uint64_t samples = input.pcm_f32le().size() / 4;
+      require(input.first_sample() <= UINT64_C(100000000000000), "worker sample position exceeds limit");
+      require(input.first_new_sample() >= input.first_sample() && input.first_new_sample() < input.first_sample() + samples,
+              "window contains no new audio or has invalid overlap");
+      require(count ? input.first_new_sample() == end : input.first_new_sample() == input.first_sample(),
+              "worker new-audio boundary is not contiguous");
+      require(!after_discontinuity || input.first_sample() == end, "overlap crossed a discontinuity");
+      require(input.boundary() >= pb::INFERENCE_BOUNDARY_FIXED && input.boundary() <= pb::INFERENCE_BOUNDARY_DISCONTINUITY,
+              "invalid inference boundary");
+      SpeechWindow window{input.window_number(), input.first_sample(), input.first_new_sample(), WindowBoundary::Fixed, {}};
+      window.samples.reserve(samples);
+      const auto& bytes = input.pcm_f32le();
+      for (size_t i = 0; i < bytes.size(); i += 4) {
+        uint32_t bits = 0;
+        for (int b = 0; b < 4; ++b) bits |= static_cast<uint32_t>(static_cast<unsigned char>(bytes[i+b])) << (8*b);
+        window.samples.push_back(std::bit_cast<float>(bits));
+      }
+      auto segments = model_.infer(window, accepted.track_id(), accepted.options(), [&] { return context->IsCancelled(); });
+      response.Clear();
+      auto* hypothesis = response.mutable_hypothesis();
+      hypothesis->set_window_number(input.window_number()); hypothesis->set_track_id(accepted.track_id());
+      for (auto& segment : segments) *hypothesis->add_segments() = std::move(segment);
+      if (response.ByteSizeLong() > 4 * 1024 * 1024)
+        return {grpc::StatusCode::RESOURCE_EXHAUSTED, "speech hypothesis exceeds output limit"};
+      if (!wire->Write(response)) return {grpc::StatusCode::CANCELLED, "worker hypothesis disconnected"};
+      ++count; end = input.first_sample() + samples;
+      after_discontinuity = input.boundary() == pb::INFERENCE_BOUNDARY_DISCONTINUITY;
+      after_end = input.boundary() == pb::INFERENCE_BOUNDARY_END;
+    }
+    return {grpc::StatusCode::CANCELLED, "worker input ended without explicit finish"};
+  } catch (const Failure& error) { return {error.code, error.what()}; }
+    catch (const std::exception&) { return {grpc::StatusCode::INTERNAL, "speech worker failed"}; }
+}
+}  // namespace media

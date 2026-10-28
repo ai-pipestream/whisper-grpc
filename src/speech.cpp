@@ -32,21 +32,25 @@ SpeechModel::SpeechModel(std::span<const char> model, std::string model_id, int 
 SpeechModel::~SpeechModel() = default;
 const std::string& SpeechModel::model_hash() const { return impl_->hash; }
 const std::string& SpeechModel::model_id() const { return impl_->id; }
+int SpeechModel::threads() const { return impl_->threads; }
 std::string SpeechModel::library_version() { return std::string("whisper.cpp/") + whisper_version(); }
-std::vector<pb::TranscriptSegment> SpeechModel::infer(const SpeechWindow& window, uint32_t track,
-    const pb::SpeechOptions& options, const std::function<bool()>& cancelled) {
-  if (window.samples.empty() || window.samples.size() > 30 * 16000 ||
-      window.first_sample > UINT64_C(100000000000000) || options.model_id() != impl_->id ||
-      options.language().find('\0') != std::string::npos ||
+void SpeechModel::validate_options(const pb::SpeechOptions& options) const {
+  if (options.model_id() != impl_->id || options.language().find('\0') != std::string::npos ||
       (!options.language().empty() && whisper_lang_id(options.language().c_str()) < 0) ||
       (options.task() != pb::SPEECH_TASK_UNSPECIFIED && options.task() != pb::SPEECH_TASK_TRANSCRIBE &&
-       options.task() != pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH))
+       options.task() != pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH) ||
+      (!whisper_is_multilingual(impl_->context) && !options.language().empty() && options.language() != "en"))
+    throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "invalid speech model options");
+}
+std::vector<pb::TranscriptSegment> SpeechModel::infer(const SpeechWindow& window, uint32_t track,
+    const pb::SpeechOptions& options, const std::function<bool()>& cancelled) {
+  validate_options(options);
+  if (window.samples.empty() || window.samples.size() > 30 * 16000 ||
+      window.first_sample > UINT64_C(100000000000000))
     throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "invalid speech inference request");
   for (float sample : window.samples)
     if (!std::isfinite(sample)) throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "nonfinite speech PCM");
   std::lock_guard lock(impl_->mutex);
-  if (!whisper_is_multilingual(impl_->context) && !options.language().empty() && options.language() != "en")
-    throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "English-only model cannot recognize requested language");
   if (cancelled()) throw Failure(grpc::StatusCode::CANCELLED, "speech cancelled");
   struct Abort {
     const std::function<bool()>& cancelled;

@@ -6,7 +6,8 @@ Typed live audio/video ingestion and speech processing over gRPC.
 The C++ server implements direct byte-stream ingress, UUID subscriptions,
 bounded in-memory hydration, checksums, lifecycle events and native FFmpeg
 demux/audio decoding. HTTP input and speech requests still fail explicitly
-with UNIMPLEMENTED. Whisper workers and smart chunking remain pending.
+with UNIMPLEMENTED. A separate native Whisper worker is implemented; ingress
+routing to it and real VAD integration remain pending.
 The media path calls native libraries with no JSON bridge, shell-based media
 processing, or request-file writes.
 
@@ -20,8 +21,9 @@ The native CPU Whisper adapter is built by default (`MEDIA_BUILD_SPEECH=OFF`
 omits it). Its source is pinned by commit and archive checksum. It loads model
 bytes in memory, fingerprints the exact weights, and returns native segment
 text, token IDs, probabilities, language and timestamps. Adapter results remain
-provisional: cross-window reconciliation, worker RPC wiring and finalization
-are still pending. It is not yet called by the media server.
+provisional: cross-window reconciliation and finalization remain pending.
+The separate `SpeechWorkerService.Transcribe` RPC invokes this adapter;
+it is not yet called by the media server.
 
 To run the separate real-model qualification, configure with
 `-DMEDIA_TEST_MODEL=/absolute/path/to/ggml-tiny.en.bin`, rebuild, then run
@@ -69,7 +71,37 @@ or behind an authenticated private gateway. Global subscriptions see all
 streams in this server, not other server processes.
 
 `docker compose up --build` builds and starts the transport in a non-root,
-read-only container. This does not yet start a Whisper model worker.
+read-only container. To also start the separate CPU worker, provide an existing
+model file and enable its profile:
+
+```sh
+WHISPER_MODEL_PATH=/absolute/path/to/ggml-tiny.en.bin \
+  docker compose --profile speech up --build
+```
+
+The worker listens on loopback port 50073, with the weights mounted read-only.
+It accepts one active RPC per model instance and returns RESOURCE_EXHAUSTED
+for excess concurrent streams. Clients must set deadlines and close unused
+streams; idle-stream expiry and a larger model pool are not implemented yet.
+No request media is saved to disk. `WHISPER_MODEL_ID` defaults to `tiny.en`,
+and `WHISPER_THREADS` defaults to four. The standalone executable uses the
+same settings and defaults to `127.0.0.1:50073`.
+
+Worker clients open one source UUID/track with model options, send complete
+mono 16 kHz float32 windows (at most 30 seconds each), and explicitly finish
+with a matching window count. Windows identify their overlap and cut reason.
+The worker applies no extra overlap. Its output is an unreconciled hypothesis
+per window; overlapping hypotheses can repeat text. Close means all supplied
+windows completed, not that a final combined transcript exists. Its handshake
+reports the actual model hash, build, native library and settings digest.
+
+To qualify the packaged worker with real inference, run
+`scripts/smoke-worker.sh IMAGE /path/to/ggml-tiny.en.bin /path/to/jfk.wav`
+after building the local test executables. The fixture is available under the
+pinned Whisper source's `samples/` directory. The driver checks native model
+output over gRPC before sending finish, overload and malformed lifecycle
+rejection, and a read-only non-root container with exactly one read-only model
+mount. This is test tooling, not a request-path shell dependency.
 
 To exercise the image using the same live wire tests (requires `grpcurl` and
 the locally built `build/media_tests`):

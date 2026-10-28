@@ -1,5 +1,9 @@
 #include "speech.h"
 #include "decoder.h"
+#include "worker.h"
+#include <grpcpp/grpcpp.h>
+#include <chrono>
+#include <cstdlib>
 #include <algorithm>
 #include <bit>
 #include <cctype>
@@ -67,6 +71,92 @@ int main(int argc, char** argv) {
     try { model.infer(window, 7, options, [] { return false; }); }
     catch (const media::Failure& f) { rejected = f.code == grpc::StatusCode::INVALID_ARGUMENT; }
     check(rejected, "English-only model accepted another language");
+    options.set_language("en");
+    media::SpeechWorker worker(model);
+    grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&worker);
+    struct ServerGuard {
+      std::unique_ptr<grpc::Server> server;
+      ~ServerGuard() { if (server) { server->Shutdown(); server->Wait(); } }
+    } guard;
+    const char* external = std::getenv("MEDIA_WORKER_TEST_TARGET");
+    if (!external) {
+      guard.server = builder.BuildAndStart();
+      check(guard.server != nullptr, "worker server did not bind");
+    }
+    auto stub = media::pb::SpeechWorkerService::NewStub(grpc::CreateChannel(
+        external ? external : "127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+    {
+      grpc::ClientContext context;
+      context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(60));
+      auto rpc = stub->Transcribe(&context);
+      media::pb::TranscribeRequest request;
+      request.mutable_open()->set_stream_id(media::uuid());
+      request.mutable_open()->set_track_id(7);
+      *request.mutable_open()->mutable_options() = options;
+      check(rpc->Write(request), "worker open failed");
+      media::pb::TranscribeResponse response;
+      check(rpc->Read(&response) && response.has_opened(), "worker handshake absent");
+      check(response.opened().producer().model_sha256() == model.model_hash() &&
+            response.opened().producer().configuration_sha256().size() == 32 &&
+            response.opened().producer().build_id().size() == 64, "worker provenance incomplete");
+      {
+        grpc::ClientContext second_context;
+        second_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto second = stub->Transcribe(&second_context);
+        second->WritesDone();
+        media::pb::TranscribeResponse ignored;
+        check(!second->Read(&ignored), "overloaded worker accepted a second stream");
+        check(second->Finish().error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED, "worker overload status wrong");
+      }
+      request.Clear();
+      auto* input = request.mutable_window();
+      input->set_window_number(1); input->set_first_sample(window.first_sample);
+      input->set_first_new_sample(window.first_sample); input->set_boundary(media::pb::INFERENCE_BOUNDARY_END);
+      auto* encoded = input->mutable_pcm_f32le();
+      for (float sample : window.samples) {
+        const auto bits = std::bit_cast<uint32_t>(sample);
+        for (int b = 0; b < 4; ++b) encoded->push_back(static_cast<char>(bits >> (8*b)));
+      }
+      check(rpc->Write(request), "worker audio write failed");
+      // Finish is deliberately withheld until the actual model output arrives.
+      check(rpc->Read(&response) && response.has_hypothesis(), "worker buffered inference until finish");
+      check(response.hypothesis().window_number() == 1 && response.hypothesis().track_id() == 7,
+            "worker output identity mismatch");
+      std::string wire_text;
+      for (const auto& segment : response.hypothesis().segments()) {
+        check(!segment.final(), "worker falsely finalized unreconciled text");
+        wire_text += segment.text();
+      }
+      check(wire_text.find("country") != std::string::npos, "wire hypothesis missing reference speech");
+      request.Clear(); request.mutable_finish()->set_window_count(1);
+      check(rpc->Write(request), "worker finish failed"); rpc->WritesDone();
+      check(rpc->Read(&response) && response.has_closed() && response.closed().window_count() == 1,
+            "worker close accounting missing");
+      check(!rpc->Read(&response) && rpc->Finish().ok(), "worker stream did not close successfully");
+    }
+    for (bool malformed_window : {false, true}) {
+      grpc::ClientContext context;
+      context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+      auto rpc = stub->Transcribe(&context);
+      media::pb::TranscribeRequest request;
+      request.mutable_open()->set_stream_id(media::uuid());
+      *request.mutable_open()->mutable_options() = options;
+      check(rpc->Write(request), "worker rejection test open failed");
+      media::pb::TranscribeResponse response;
+      check(rpc->Read(&response) && response.has_opened(), "worker slot not released");
+      if (malformed_window) {
+        request.Clear(); request.mutable_window()->set_window_number(2);
+        check(rpc->Write(request), "malformed request write failed");
+      }
+      rpc->WritesDone();
+      check(!rpc->Read(&response), "worker accepted malformed close or window");
+      check(rpc->Finish().error_code() == (malformed_window ? grpc::StatusCode::INVALID_ARGUMENT : grpc::StatusCode::CANCELLED),
+            "worker lifecycle rejection status wrong");
+    }
+    std::cout << "Live worker inference, overload and lifecycle tests passed\n";
     std::cout << "Native speech recognition, cancellation and model identity tests passed\n";
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

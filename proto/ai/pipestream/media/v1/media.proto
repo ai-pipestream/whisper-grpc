@@ -537,3 +537,101 @@ message StreamClosed {
   // SHA-256 of all accepted source bytes, even for a failed partial stream.
   bytes source_sha256 = 5;
 }
+
+// Native inference worker. The caller owns VAD, windowing and reconciliation.
+service SpeechWorkerService {
+  // Open one track, submit numbered windows, and explicitly finish.
+  rpc Transcribe(stream TranscribeRequest) returns (stream TranscribeResponse);
+}
+
+// One worker input message; audio windows already contain any intended overlap.
+message TranscribeRequest {
+  // Strict open, windows, finish lifecycle.
+  oneof payload {
+    // Required first and exactly once.
+    SpeechWorkerOpen open = 1;
+    // Complete bounded inference window; never overlapped again by the worker.
+    InferenceWindow window = 2;
+    // Required after the last window, including an empty track.
+    SpeechWorkerFinish finish = 3;
+  }
+}
+
+// One source track and model invocation configuration.
+message SpeechWorkerOpen {
+  // Source stream UUID assigned by the ingress service.
+  string stream_id = 1;
+  // Source container track index.
+  uint32 track_id = 2;
+  // Model/task/language options; windowing must be absent because windows are supplied.
+  SpeechOptions options = 3;
+}
+
+// Why this inference window ended.
+enum InferenceBoundary {
+  // Invalid in a submitted window.
+  INFERENCE_BOUNDARY_UNSPECIFIED = 0;
+  // Configured fixed duration.
+  INFERENCE_BOUNDARY_FIXED = 1;
+  // Confirmed pause, according to the upstream VAD.
+  INFERENCE_BOUNDARY_PAUSE = 2;
+  // Hard duration limit without a confirmed pause.
+  INFERENCE_BOUNDARY_FORCED = 3;
+  // End of source audio.
+  INFERENCE_BOUNDARY_END = 4;
+  // Source timeline discontinuity immediately follows this window.
+  INFERENCE_BOUNDARY_DISCONTINUITY = 5;
+}
+
+// One complete mono 16 kHz PCM window, at most 30 seconds.
+message InferenceWindow {
+  // Contiguous per-worker-stream number, beginning at one.
+  uint64 window_number = 1;
+  // Absolute first sample on the source track's decoded timeline.
+  uint64 first_sample = 2;
+  // First sample not covered by earlier windows; explicitly identifies overlap.
+  uint64 first_new_sample = 3;
+  // IEEE-754 float32 little-endian samples, with no transport padding.
+  bytes pcm_f32le = 4;
+  // Explicit reason supplied by the upstream window selection stage.
+  InferenceBoundary boundary = 5;
+}
+
+// Explicit worker-stream accounting.
+message SpeechWorkerFinish {
+  // Total submitted windows, including those with no recognized speech.
+  uint64 window_count = 1;
+}
+
+// Worker output, ordered within the one source track.
+message TranscribeResponse {
+  // Handshake, one hypothesis per window, then successful close.
+  oneof payload {
+    // Accepted configuration and actual model identity.
+    SpeechWorkerOpened opened = 1;
+    // Complete hypothesis for one input window, possibly containing no segments.
+    SpeechHypothesis hypothesis = 2;
+    // All windows have been processed; does not finalize reconciled transcripts.
+    SpeechWorkerFinish closed = 3;
+  }
+}
+
+// Worker identity and accepted configuration.
+message SpeechWorkerOpened {
+  // Echoed source and accepted options; task defaults are resolved.
+  SpeechWorkerOpen accepted = 1;
+  // Actual server/model provenance, including weights and settings hashes.
+  Producer producer = 2;
+  // Largest accepted PCM sample count per inference window.
+  uint32 max_window_samples = 3;
+}
+
+// Unreconciled native model output. Overlapping windows may repeat speech.
+message SpeechHypothesis {
+  // Input window whose inference completed.
+  uint64 window_number = 1;
+  // Source track; no cross-track inference state is shared.
+  uint32 track_id = 2;
+  // Native segments are provisional; the upstream reconciler owns finalization.
+  repeated TranscriptSegment segments = 3;
+}

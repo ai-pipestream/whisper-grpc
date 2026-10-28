@@ -12,6 +12,7 @@ class SpeechModel {
  public:
   SpeechModel(std::span<const char> model, std::string model_id, int threads);
   ~SpeechModel();
+  void validate_options(const pb::SpeechOptions& options) const;
   SpeechModel(const SpeechModel&) = delete;
   SpeechModel& operator=(const SpeechModel&) = delete;
   std::vector<pb::TranscriptSegment> infer(const SpeechWindow& window, uint32_t track,
@@ -19,6 +20,7 @@ class SpeechModel {
                                          const std::function<bool()>& cancelled);
   const std::string& model_hash() const;
   const std::string& model_id() const;
+  int threads() const;
   static std::string library_version();
  private:
   struct Impl;
