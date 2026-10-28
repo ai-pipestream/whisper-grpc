@@ -30,7 +30,24 @@ int main() {
       processing = std::make_unique<media::SpeechPipelineFactory>(target, std::move(vad), registry.machine_id());
     }
 #endif
-    media::Service service(registry, processing.get());
+    media::HttpPolicy http;
+    if (const char* raw = std::getenv("WHISPER_HTTP_ORIGINS"); raw && *raw) {
+      std::string origins(raw);
+      size_t start = 0;
+      do {
+        const auto end = origins.find(',', start);
+        const auto item = origins.substr(start, end == std::string::npos ? end : end - start);
+        if (item != media::HttpInput::origin(item)) throw std::runtime_error("HTTP origins must use canonical scheme://host:port form");
+        http.allowed_origins.insert(item);
+        if (end == std::string::npos) break;
+        start = end + 1;
+      } while (true);
+    }
+    if (const char* raw = std::getenv("WHISPER_HTTP_ALLOW_PRIVATE")) {
+      if (std::string(raw) != "0" && std::string(raw) != "1") throw std::runtime_error("WHISPER_HTTP_ALLOW_PRIVATE must be 0 or 1");
+      http.allow_private_addresses = std::string(raw) == "1";
+    }
+    media::Service service(registry, processing.get(), std::move(http));
     grpc::EnableDefaultHealthCheckService(true);
     grpc::reflection::InitProtoReflectionServerBuilderPlugin();
     grpc::ServerBuilder builder;

@@ -7,8 +7,8 @@ The C++ server implements direct byte-stream ingress, UUID subscriptions,
 bounded in-memory hydration, checksums, lifecycle events and native FFmpeg
 demux/audio decoding. Configured ingress routes audio through fixed or VAD-based
 windows to a separate native Whisper worker and publishes provisional hypotheses.
-HTTP input still fails explicitly with UNIMPLEMENTED. Cross-window transcript
-reconciliation and finalization remain pending.
+The `Pull` RPC reads permitted HTTP sources through the same pipeline. Cross-window
+transcript reconciliation and finalization remain pending.
 The media path calls native libraries with no JSON bridge, shell-based media
 processing, or request-file writes.
 
@@ -67,7 +67,8 @@ Validate the draft contract with `buf lint` and `buf build`.
 
 Install a C++20 compiler, CMake, gRPC C++ (including the reflection library
 and protoc plugin), protobuf, OpenSSL and FFmpeg development packages
-(`libavformat`, `libavcodec`, `libavutil`, `libswresample`). Use a protoc
+(`libavformat`, `libavcodec`, `libavutil`, `libswresample`) plus libcurl development
+headers and library (7.86 or newer, with asynchronous DNS). Use a protoc
 version matching the protobuf libraries on the machine.
 
 ```sh
@@ -177,6 +178,40 @@ concurrent snapshot/live transitions, future-stream selectors, replay eviction,
 slow subscribers, cancellation and malformed lifecycle messages. These tests
 include native WAV/NUT media decoding but do not establish speech-recognition
 correctness.
+
+## HTTP input
+
+Use `MediaService.Pull` with `PullRequest.open.http.url` and the same decode
+and speech options as direct ingestion. HTTP is not an alternative source on
+the bidirectional `Ingest` RPC. Pull returns an opening event, sanitized HTTP
+metadata, numbered original-byte chunks, requested derived results, and an
+explicit close with byte counts and SHA-256. Cancellation terminates the pull.
+Response EOF supplies the finish boundary; the caller sends no source chunks
+or finish message on this server-streaming RPC.
+
+Configure `WHISPER_HTTP_ORIGINS` as a comma-separated list of exact canonical
+origins, for example `https://media.example.org:443,http://camera.internal:8080`.
+An empty list denies HTTP input. Private/local addresses also require
+`WHISPER_HTTP_ALLOW_PRIVATE=1`; destination addresses are checked when libcurl
+opens each socket, after DNS resolution. Proxy environment variables are not
+used. TLS certificate verification remains enabled. URLs containing credentials
+or fragments are rejected. Published HTTP metadata includes only origin and
+status, with native libcurl provenance; paths, queries, cookies and authorization
+values are not published. Credential profiles are not implemented yet.
+
+The reader uses HTTP/1.1 and a 64 KiB application payload queue; this is not a
+whole-process RSS limit. It pauses receiving during downstream processing,
+so model inference is not mistaken for an HTTP source stall. HTTP transfer
+framing is removed, but entity content is not decompressed. Redirects, non-2xx
+responses and encoded entities such as gzip fail explicitly. Truncated declared
+bodies also fail instead of appearing as successful EOF. HLS/DASH manifests,
+redirect following, authentication profiles and HTTP/2/3 remain unsupported.
+
+The HTTP tests use native local sockets and a real gRPC server. They withhold
+the second half of a WAV response until decoded PCM arrives through `Pull`,
+check every source byte and sample count, and verify hydrated HTTP metadata and
+terminal state. Other cases cover chunked transfer framing, bounded buffering,
+destination policy, cancellation, error status, redirects and truncation.
 
 ## Native media output
 

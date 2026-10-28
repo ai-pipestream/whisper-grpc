@@ -1,7 +1,7 @@
 FROM debian:trixie-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates cmake g++ make pkg-config libgrpc++-dev libprotobuf-dev \
-    protobuf-compiler protobuf-compiler-grpc libssl-dev \
+    protobuf-compiler protobuf-compiler-grpc libssl-dev libcurl4-openssl-dev \
     libavformat-dev libavcodec-dev libavutil-dev libswresample-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -15,7 +15,7 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libgrpc++1.51t64 libprotobuf32t64 libssl3t64 libgomp1 \
+    ca-certificates libgrpc++1.51t64 libprotobuf32t64 libssl3t64 libgomp1 libcurl4t64 \
     libavformat61 libavcodec61 libavutil59 libswresample5 && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/whisper-media-server /usr/local/bin/whisper-media-server

@@ -32,6 +32,60 @@ class Digest {
 }  // namespace
 
 grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWriter<pb::IngestResponse, pb::IngestRequest>* wire) {
+  return process(context, [&](auto* request) { return wire->Read(request); },
+                 [&](const auto& response) { return wire->Write(response); });
+}
+
+grpc::Status Service::Pull(grpc::ServerContext* context, const pb::PullRequest* request,
+                           grpc::ServerWriter<pb::PullResponse>* wire) {
+  try {
+    if (!request->has_open() || !request->open().has_http())
+      throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "Pull requires an HTTP source");
+    if (!request->open().http().credential_profile().empty())
+      throw Failure(grpc::StatusCode::UNIMPLEMENTED, "HTTP credential profiles are not implemented");
+    HttpInput input(request->open().http().url(), http_, [&] { return context->IsCancelled(); });
+    auto accepted = request->open();
+    if (accepted.stream_id().empty()) accepted.set_stream_id(uuid());
+    bool opened = false, described = false;
+    uint64_t count = 0, bytes = 0;
+    auto describe = [&] {
+      if (described || input.status_code() == 0) return;
+      pb::StreamEvent event;
+      event.mutable_http_info()->set_origin(HttpInput::origin(accepted.http().url()));
+      event.mutable_http_info()->set_status_code(input.status_code());
+      pb::PullResponse response;
+      *response.mutable_event() = registry_.derived(accepted.stream_id(), std::move(event), HttpInput::library_version());
+      if (!wire->Write(response)) throw Failure(grpc::StatusCode::CANCELLED, "HTTP source response disconnected");
+      described = true;
+    };
+    return process(context, [&](pb::IngestRequest* message) {
+      message->Clear();
+      if (!opened) { *message->mutable_open() = accepted; opened = true; return true; }
+      std::string buffer(registry_.limits().max_chunk_bytes, '\0');
+      size_t n;
+      try { n = input.read(buffer.data(), buffer.size()); }
+      catch (...) { describe(); throw; }
+      describe();
+      if (!n) {
+        message->mutable_finish()->set_chunk_count(count); message->mutable_finish()->set_byte_count(bytes);
+      } else {
+        if (count == std::numeric_limits<uint64_t>::max() || n > std::numeric_limits<uint64_t>::max() - bytes)
+          throw Failure(grpc::StatusCode::RESOURCE_EXHAUSTED, "HTTP source accounting overflow");
+        buffer.resize(n);
+        auto* chunk = message->mutable_chunk();
+        chunk->set_chunk_number(++count); chunk->set_byte_offset(bytes); chunk->set_data(std::move(buffer)); bytes += n;
+      }
+      return true;
+    }, [&](const pb::IngestResponse& response) {
+      pb::PullResponse output; *output.mutable_event() = response.event(); return wire->Write(output);
+    }, true);
+  } catch (const Failure& error) { return {error.code, error.what()}; }
+    catch (const std::exception&) { return {grpc::StatusCode::INTERNAL, "HTTP pull initialization failed"}; }
+}
+
+grpc::Status Service::process(grpc::ServerContext* context,
+    const std::function<bool(pb::IngestRequest*)>& read,
+    const std::function<bool(const pb::IngestResponse&)>& write, bool http) {
   std::string id;
   uint64_t count = 0, bytes = 0;
   grpc::Status status;
@@ -40,20 +94,20 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
   auto send = [&](const pb::StreamEvent& event) {
     pb::IngestResponse response;
     *response.mutable_event() = event;
-    if (!wire->Write(response)) throw Failure(grpc::StatusCode::CANCELLED, "ingress response disconnected");
+    if (!write(response)) throw Failure(grpc::StatusCode::CANCELLED, "ingress response disconnected");
   };
   try {
     Digest digest;
     try {
       pb::IngestRequest request;
-      if (!wire->Read(&request) || !request.has_open())
+      if (!read(&request) || !request.has_open())
         throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "first message must open a stream");
       auto accepted = request.open();
       if (!accepted.speech().empty()) {
         if (!processing_) throw Failure(grpc::StatusCode::UNIMPLEMENTED, "speech worker is not configured");
         processing_->resolve(accepted);
       }
-      const auto opened = registry_.open(accepted, processing_ != nullptr);
+      const auto opened = registry_.open(accepted, processing_ != nullptr, http);
       auto options = accepted.decode();
       const bool decoding = accepted.has_decode() || !accepted.speech().empty();
       id = opened.cursor().stream_id();
@@ -69,7 +123,7 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
       size_t offset = 0;
       auto next_chunk = [&]() -> bool {
         if (explicit_finish) return false;
-        if (!wire->Read(&request)) throw Failure(grpc::StatusCode::CANCELLED, "input ended without FinishStream");
+        if (!read(&request)) throw Failure(grpc::StatusCode::CANCELLED, "input ended without FinishStream");
         if (request.has_finish()) {
           finish = request.finish();
           explicit_finish = true;
@@ -137,7 +191,7 @@ grpc::Status Service::Ingest(grpc::ServerContext* context, grpc::ServerReaderWri
     // Publish terminal state for observers even if the originating client left.
     pb::IngestResponse response;
     *response.mutable_event() = event;
-    if (!wire->Write(response) && status.ok())
+    if (!write(response) && status.ok())
       return {grpc::StatusCode::CANCELLED, "terminal response disconnected"};
     return status;
   } catch (const std::exception&) {

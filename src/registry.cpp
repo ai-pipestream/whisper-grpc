@@ -71,7 +71,8 @@ bool Subscription::accepts(const pb::StreamEvent& event) const {
          (event.has_transcript() && kinds_.contains(pb::PAYLOAD_KIND_TRANSCRIPT)) ||
          (event.has_media_info() && kinds_.contains(pb::PAYLOAD_KIND_MEDIA_INFO)) ||
          (event.has_packet() && kinds_.contains(pb::PAYLOAD_KIND_PACKET)) ||
-         (event.has_hypothesis() && kinds_.contains(pb::PAYLOAD_KIND_HYPOTHESIS));
+         (event.has_hypothesis() && kinds_.contains(pb::PAYLOAD_KIND_HYPOTHESIS)) ||
+         (event.has_http_info() && kinds_.contains(pb::PAYLOAD_KIND_HTTP_INFO));
 }
 bool Subscription::push(pb::SubscribeResponse response) {
   std::lock_guard lock(mutex_);
@@ -162,9 +163,9 @@ pb::StreamEvent Registry::publish(const std::string& id, Stream& stream, pb::Str
   return event;
 }
 
-pb::StreamEvent Registry::open(const pb::OpenStream& request, bool speech_enabled) {
+pb::StreamEvent Registry::open(const pb::OpenStream& request, bool speech_enabled, bool http_enabled) {
   require(request.source_case() != pb::OpenStream::SOURCE_NOT_SET, grpc::StatusCode::INVALID_ARGUMENT, "source is required");
-  require(request.has_direct(), grpc::StatusCode::UNIMPLEMENTED, "only direct ingress is implemented in this build");
+  require(request.has_direct() || (http_enabled && request.has_http()), grpc::StatusCode::UNIMPLEMENTED, "HTTP input requires the Pull RPC");
   require(request.speech().empty() || speech_enabled, grpc::StatusCode::UNIMPLEMENTED, "speech worker is not connected in this build");
   require(request.decode().audio_track_ids_size() <= 64, grpc::StatusCode::RESOURCE_EXHAUSTED, "too many selected audio tracks");
   require(request.decode().audio_track_ids().empty() || request.decode().emit_audio() || !request.speech().empty(),
@@ -185,6 +186,7 @@ pb::StreamEvent Registry::open(const pb::OpenStream& request, bool speech_enable
   pb::StreamEvent event;
   auto* opened = event.mutable_opened();
   *opened->mutable_source() = request.direct();
+  if (request.has_http()) opened->mutable_source()->set_name("HTTP response entity");
   opened->set_max_chunk_bytes(limits_.max_chunk_bytes);
   opened->set_retention_bytes(limits_.retention_bytes);
   if (request.has_decode()) *opened->mutable_decode() = request.decode();
@@ -217,7 +219,7 @@ pb::StreamEvent Registry::close(const std::string& id, const pb::StreamClosed& c
 }
 
 pb::StreamEvent Registry::derived(const std::string& id, pb::StreamEvent event, const std::string& library_version) {
-  require(event.has_media_info() || event.has_audio() || event.has_packet() || event.has_hypothesis(),
+  require(event.has_media_info() || event.has_audio() || event.has_packet() || event.has_hypothesis() || event.has_http_info(),
           grpc::StatusCode::INVALID_ARGUMENT, "unsupported derived payload");
   require(event.ByteSizeLong() <= 512 * 1024, grpc::StatusCode::RESOURCE_EXHAUSTED, "derived event exceeds limit");
   std::lock_guard lock(mutex_);
@@ -240,6 +242,7 @@ pb::StreamEvent Registry::derived(const std::string& id, pb::StreamEvent event, 
     *it->second.snapshot.add_producers() = event.producer();
   }
   if (event.has_media_info()) *it->second.snapshot.mutable_media_info() = event.media_info();
+  if (event.has_http_info()) *it->second.snapshot.mutable_http_info() = event.http_info();
   if (event.has_hypothesis()) {
     auto& snapshot = it->second.snapshot;
     auto* hypotheses = snapshot.mutable_hypotheses();
@@ -257,7 +260,7 @@ std::shared_ptr<Subscription> Registry::subscribe(const pb::SubscribeRequest& re
   require(request.stream_ids_size() <= static_cast<int>(limits_.max_streams), grpc::StatusCode::RESOURCE_EXHAUSTED, "too many selected streams");
   require(request.hydration().after_size() <= static_cast<int>(limits_.max_streams), grpc::StatusCode::RESOURCE_EXHAUSTED, "too many replay cursors");
   for (const auto& id : request.stream_ids()) require(valid_uuid(id), grpc::StatusCode::INVALID_ARGUMENT, "invalid stream UUID");
-  for (int kind : request.payload_kinds()) require(kind >= pb::PAYLOAD_KIND_SOURCE && kind <= pb::PAYLOAD_KIND_HYPOTHESIS, grpc::StatusCode::INVALID_ARGUMENT, "invalid payload kind");
+  for (int kind : request.payload_kinds()) require(kind >= pb::PAYLOAD_KIND_SOURCE && kind <= pb::PAYLOAD_KIND_HTTP_INFO, grpc::StatusCode::INVALID_ARGUMENT, "invalid payload kind");
   const auto& hydration = request.hydration();
   require(hydration.after().empty() || hydration.retained_events(), grpc::StatusCode::INVALID_ARGUMENT, "replay cursors require retained_events");
   auto sub = std::make_shared<Subscription>(request, limits_.subscriber_bytes);

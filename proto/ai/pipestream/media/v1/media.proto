@@ -8,8 +8,22 @@ import "google/protobuf/timestamp.proto";
 service MediaService {
   // Open once, send ordered chunks, then explicitly finish; results stream back.
   rpc Ingest(stream IngestRequest) returns (stream IngestResponse);
+  // Pull a permitted HTTP source; response EOF produces explicit stream closure.
+  rpc Pull(PullRequest) returns (stream PullResponse);
   // Hydrate matching streams at a consistent boundary, then follow live events.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// HTTP source and optional media/speech processing configuration.
+message PullRequest {
+  // Must select the HTTP source variant; credentials are server controlled.
+  OpenStream open = 1;
+}
+
+// Identical event vocabulary to direct ingestion and independent subscriptions.
+message PullResponse {
+  // Source bytes, derived results and lifecycle events from the pull.
+  StreamEvent event = 1;
 }
 
 // One client message on the ingress connection.
@@ -57,6 +71,8 @@ enum PayloadKind {
   PAYLOAD_KIND_PACKET = 5;
   // Unreconciled model output, distinct from finalized transcript revisions.
   PAYLOAD_KIND_HYPOTHESIS = 6;
+  // Sanitized HTTP response metadata, without request secrets or cookies.
+  PAYLOAD_KIND_HTTP_INFO = 7;
 }
 
 // Bounded hydration policy; this does not imply durable storage.
@@ -128,6 +144,8 @@ message StreamSnapshot {
   MediaInfo media_info = 8;
   // Bounded most-recent worker hypotheses; these are not a combined transcript.
   repeated SpeechHypothesis hypotheses = 9;
+  // HTTP response information when the source was pulled by the server.
+  HttpResponseInfo http_info = 10;
 }
 
 // Initial input declaration.
@@ -320,7 +338,17 @@ message StreamEvent {
     EncodedPacket packet = 10;
     // Provisional window-level result; overlapping windows may repeat text.
     SpeechHypothesis hypothesis = 11;
+    // HTTP status and sanitized origin; excludes URL query and user credentials.
+    HttpResponseInfo http_info = 12;
   }
+}
+
+// Metadata for the HTTP response entity used as original source bytes.
+message HttpResponseInfo {
+  // Canonical scheme, host and explicit port, without path or query.
+  string origin = 1;
+  // HTTP response status. Transport failures may have no response metadata.
+  uint32 status_code = 2;
 }
 
 // Accepted stream declaration and its negotiated limits.

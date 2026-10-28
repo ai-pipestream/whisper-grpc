@@ -10,6 +10,8 @@ services:
     environment:
       WHISPER_MACHINE_ID: ${WHISPER_MACHINE_ID:-}
       WHISPER_WORKER_TARGET: ${WHISPER_WORKER_TARGET:-}
+      WHISPER_HTTP_ORIGINS: ${WHISPER_HTTP_ORIGINS:-}
+      WHISPER_HTTP_ALLOW_PRIVATE: ${WHISPER_HTTP_ALLOW_PRIVATE:-0}
   speech:
     profiles: [speech]
     build: .

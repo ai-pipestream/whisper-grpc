@@ -63,7 +63,7 @@ class Subscription {
 class Registry {
  public:
   explicit Registry(Limits limits = {}, std::string machine_id = {});
-  pb::StreamEvent open(const pb::OpenStream& request, bool speech_enabled = false);
+  pb::StreamEvent open(const pb::OpenStream& request, bool speech_enabled = false, bool http_enabled = false);
   pb::StreamEvent source(const std::string& id, const pb::SourceChunk& chunk);
   pb::StreamEvent derived(const std::string& id, pb::StreamEvent event, const std::string& library_version);
   pb::StreamEvent close(const std::string& id, const pb::StreamClosed& closed);

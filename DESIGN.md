@@ -5,7 +5,7 @@ bounded hydration, source checksums and native FFmpeg demux/audio decoding have
 a C++ implementation and loopback gRPC tests. The sections below describe the
 full target, including work not yet implemented. The separate speech worker
 performs native inference and ingress chains to it through fixed or real VAD
-windows. HTTP input and reconciliation remain pending; see README.md for
+windows. HTTP Pull uses the same processing path; reconciliation remains pending. See README.md for
 current format coverage and limits.
 
 ## Required behavior
