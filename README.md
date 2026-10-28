@@ -10,6 +10,12 @@ with UNIMPLEMENTED. Whisper workers and smart chunking remain pending.
 The media path calls native libraries with no JSON bridge, shell-based media
 processing, or request-file writes.
 
+The standalone speech-window engine is implemented and tested for fixed cuts,
+confirmed pauses, forced overlap, bounded continuous speech, final flush and
+timeline discontinuities. It consumes caller-supplied VAD decisions; it is not
+yet connected to a real VAD model or exposed through the service. This is not
+evidence of speech-recognition accuracy or reliable real-world pause detection.
+
 See [DESIGN.md](DESIGN.md) for the required behavior and acceptance tests,
 and [media.proto](proto/ai/pipestream/media/v1/media.proto) for the initial
 ingress, subscription, lifecycle, source-byte and speech-result messages.
