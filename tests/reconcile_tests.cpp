@@ -114,6 +114,15 @@ int main() {
   failed=false; try {mismatch.accept(bad,0);} catch(const Failure& e) {
     failed=e.code==grpc::StatusCode::DATA_LOSS;
   } check(failed);
+  // Overlapping audio can yield speech only beyond the preceding window.
+  out.clear(); Reconciler disjoint([&](auto s){out.push_back(std::move(s));});
+  disjoint.accept(window(1,0,0,{{" earlier",3300000,3600000}}),16000);
+  disjoint.accept(window(2,48000,64000,{{" later",4500000,4900000}}),0);
+  disjoint.finish(); text.clear();
+  for(const auto& s:out) if(s.final()) {
+    check(s.reconciliation()==pb::RECONCILIATION_STATUS_DIRECT); text+=s.text();
+  }
+  check(text==" earlier later");
   std::cout<<"reconciliation cases passed\n";
  } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }
