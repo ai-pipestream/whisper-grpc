@@ -1,0 +1,11 @@
+name: whisper-grpc
+services:
+  media:
+    build: .
+    ports:
+      - "127.0.0.1:50072:50072"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      WHISPER_MACHINE_ID: ${WHISPER_MACHINE_ID:-}

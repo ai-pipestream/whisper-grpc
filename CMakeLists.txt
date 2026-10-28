@@ -1,0 +1,58 @@
+cmake_minimum_required(VERSION 3.20)
+project(whisper_grpc VERSION 0.1.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(CTest)
+find_package(Protobuf REQUIRED)
+execute_process(COMMAND "${Protobuf_PROTOC_EXECUTABLE}" --version
+  OUTPUT_VARIABLE PROTOC_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+string(REPLACE "libprotoc " "" PROTOC_VERSION "${PROTOC_VERSION}")
+if(Protobuf_VERSION VERSION_LESS "4.0" AND NOT PROTOC_VERSION VERSION_EQUAL Protobuf_VERSION)
+  message(FATAL_ERROR "protoc ${PROTOC_VERSION} does not match libprotobuf ${Protobuf_VERSION}. Set Protobuf_PROTOC_EXECUTABLE to the matching compiler.")
+endif()
+find_package(gRPC CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+
+set(PROTO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/proto")
+set(PROTO_REL "ai/pipestream/media/v1/media")
+set(GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${GENERATED}")
+add_custom_command(
+  OUTPUT "${GENERATED}/${PROTO_REL}.pb.cc" "${GENERATED}/${PROTO_REL}.pb.h"
+         "${GENERATED}/${PROTO_REL}.grpc.pb.cc" "${GENERATED}/${PROTO_REL}.grpc.pb.h"
+  COMMAND protobuf::protoc
+    --proto_path=${PROTO_ROOT} --proto_path=${Protobuf_INCLUDE_DIRS}
+    --cpp_out=${GENERATED} --grpc_out=${GENERATED}
+    --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>
+    "${PROTO_ROOT}/${PROTO_REL}.proto"
+  DEPENDS "${PROTO_ROOT}/${PROTO_REL}.proto"
+  VERBATIM)
+add_library(media_proto "${GENERATED}/${PROTO_REL}.pb.cc" "${GENERATED}/${PROTO_REL}.grpc.pb.cc")
+target_include_directories(media_proto PUBLIC "${GENERATED}")
+target_link_libraries(media_proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
+add_library(media_core src/registry.cpp src/service.cpp)
+target_include_directories(media_core PUBLIC src)
+target_link_libraries(media_core PUBLIC media_proto OpenSSL::Crypto Threads::Threads)
+target_compile_options(media_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
+file(GLOB_RECURSE BUILD_INPUTS CONFIGURE_DEPENDS "src/*.cpp" "src/*.h" "proto/*.proto")
+list(APPEND BUILD_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
+list(SORT BUILD_INPUTS)
+set(BUILD_ID_INPUT "")
+foreach(INPUT IN LISTS BUILD_INPUTS)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${INPUT}")
+  file(SHA256 "${INPUT}" INPUT_HASH)
+  file(RELATIVE_PATH INPUT_PATH "${CMAKE_CURRENT_SOURCE_DIR}" "${INPUT}")
+  string(APPEND BUILD_ID_INPUT "${INPUT_PATH}:${INPUT_HASH}\n")
+endforeach()
+string(SHA256 MEDIA_BUILD_ID "${BUILD_ID_INPUT}")
+target_compile_definitions(media_core PRIVATE MEDIA_APP_VERSION="${PROJECT_VERSION}" MEDIA_BUILD_ID="${MEDIA_BUILD_ID}")
+add_executable(whisper-media-server src/main.cpp)
+target_link_libraries(whisper-media-server PRIVATE media_core gRPC::grpc++_reflection)
+if(BUILD_TESTING)
+  add_executable(media_tests tests/media_tests.cpp)
+  target_link_libraries(media_tests PRIVATE media_core)
+  target_compile_options(media_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME media_tests COMMAND media_tests)
+  set_tests_properties(media_tests PROPERTIES TIMEOUT 30)
+endif()

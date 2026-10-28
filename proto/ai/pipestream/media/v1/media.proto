@@ -1,0 +1,383 @@
+syntax = "proto3";
+
+package ai.pipestream.media.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Diskless media ingress and machine-scoped event subscriptions.
+service MediaService {
+  // Open once, send ordered chunks, then explicitly finish; results stream back.
+  rpc Ingest(stream IngestRequest) returns (stream IngestResponse);
+  // Hydrate matching streams at a consistent boundary, then follow live events.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// One client message on the ingress connection.
+message IngestRequest {
+  // Opening and finishing are explicit protocol messages.
+  oneof payload {
+    // Required first; repeated opens are invalid.
+    OpenStream open = 1;
+    // Direct upload only; sequence and byte offset must be contiguous.
+    SourceChunk chunk = 2;
+    // Flush and finalize; an unexpected disconnect is not successful completion.
+    FinishStream finish = 3;
+  }
+}
+
+// One result on the ingress connection.
+message IngestResponse {
+  // Same envelope used by independent subscribers.
+  StreamEvent event = 1;
+}
+
+// Request to follow a machine's published streams.
+message SubscribeRequest {
+  // Optional UUID allowlist. Empty selects all authorized streams, including future ones.
+  repeated string stream_ids = 1;
+  // Specifies metadata and bounded history to send before live delivery.
+  Hydration hydration = 2;
+  // Restricts payload types; empty selects every payload type.
+  repeated PayloadKind payload_kinds = 3;
+}
+
+// Payload classes for a subscription; lifecycle and hydration boundaries are always sent.
+enum PayloadKind {
+  // Invalid as an explicit filter entry.
+  PAYLOAD_KIND_UNSPECIFIED = 0;
+  // Byte-identical incoming media, before decoding or remuxing.
+  PAYLOAD_KIND_SOURCE = 1;
+  // Decoded audio suitable for chained model services.
+  PAYLOAD_KIND_AUDIO = 2;
+  // Speech transcription or English translation results.
+  PAYLOAD_KIND_TRANSCRIPT = 3;
+}
+
+// Bounded hydration policy; this does not imply durable storage.
+message Hydration {
+  // Include current stream description, producer and model identities.
+  bool metadata = 1;
+  // Include retained events newer than the optional per-stream cursors.
+  bool retained_events = 2;
+  // Resume positions. Reject stale epochs or unavailable history instead of hiding gaps.
+  repeated Cursor after = 3;
+}
+
+// A subscriber receives lifecycle boundaries and a single ordered event stream.
+message SubscribeResponse {
+  // Hydration is delimited separately from per-stream event numbering.
+  oneof payload {
+    // The snapshot high-water marks; live events follow these positions.
+    SnapshotBegin snapshot_begin = 1;
+    // Hydrated metadata; does not consume a stream event sequence number.
+    StreamSnapshot snapshot = 2;
+    // A retained or live stream event, retaining its original identity.
+    StreamEvent event = 3;
+    // All selected retained events through the high-water marks have been sent.
+    SnapshotEnd snapshot_end = 4;
+  }
+}
+
+// A stable event position within one server incarnation.
+message Cursor {
+  // UUID assigned on server startup; changes on restart.
+  string server_epoch = 1;
+  // UUID for one input stream; never reused during this epoch.
+  string stream_id = 2;
+  // Monotonic per-stream event number, beginning at one.
+  uint64 event_sequence = 3;
+}
+
+// Beginning of an atomic hydration-to-live subscription.
+message SnapshotBegin {
+  // Unique ID matching SnapshotEnd.
+  string snapshot_id = 1;
+  // Frozen positions for the streams present when the subscription was registered.
+  repeated Cursor through = 2;
+}
+
+// End of hydration; events newer than the frozen positions follow.
+message SnapshotEnd {
+  // Matches the corresponding SnapshotBegin.
+  string snapshot_id = 1;
+}
+
+// The current description of one stream at a snapshot boundary.
+message StreamSnapshot {
+  // Latest event represented by this state.
+  Cursor through = 1;
+  // First event still available in memory; may be greater than one.
+  uint64 first_retained_sequence = 2;
+  // Original handshake, with input credentials excluded.
+  StreamOpened opened = 3;
+  // Present only if the stream has reached a terminal state.
+  StreamClosed closed = 4;
+  // Producers participating in this stream, including actual model identities.
+  repeated Producer producers = 5;
+  // Latest retained revision of each speech segment as of the snapshot boundary.
+  repeated TranscriptSegment transcripts = 6;
+  // True if older result state was evicted; transcripts is not a complete history.
+  bool result_state_truncated = 7;
+}
+
+// Initial input declaration.
+message OpenStream {
+  // Optional caller UUID; the server generates one when absent and rejects collisions.
+  string stream_id = 1;
+  // Source identity and optional HTTP pull configuration.
+  oneof source {
+    // Caller uploads bytes using SourceChunk messages.
+    DirectSource direct = 2;
+    // Server pulls an HTTP(S) response incrementally under its configured URL policy.
+    HttpSource http = 3;
+  }
+  // Requested downstream processing; empty means lossless source relay only.
+  repeated SpeechOptions speech = 4;
+}
+
+// Direct gRPC media upload.
+message DirectSource {
+  // User-facing source name, never a server filesystem path.
+  string name = 1;
+  // Optional media type hint; validated against the decoder's observations.
+  string media_type = 2;
+}
+
+// HTTP pull input. Request secrets must never appear in published metadata.
+message HttpSource {
+  // HTTP(S) URL; redirects and each resolved destination require policy validation.
+  string url = 1;
+  // Opaque server-configured credential reference, not a credential value.
+  string credential_profile = 2;
+}
+
+// Exact source bytes; transport boundaries need not be codec or keyframe boundaries.
+message SourceChunk {
+  // Contiguous source chunk number, starting at one.
+  uint64 chunk_number = 1;
+  // Zero-based position in the original byte stream.
+  uint64 byte_offset = 2;
+  // Unmodified source bytes, subject to the server's advertised message limit.
+  bytes data = 3;
+  // Optional SHA-256 supplied by the client; exactly 32 bytes when present.
+  bytes sha256 = 4;
+}
+
+// Explicit input completion, distinct from a cancelled or broken connection.
+message FinishStream {
+  // Must equal the number of accepted source chunks.
+  uint64 chunk_count = 1;
+  // Must equal the number of accepted source bytes.
+  uint64 byte_count = 2;
+  // Optional SHA-256 of the complete source byte stream.
+  bytes sha256 = 3;
+}
+
+// Options for one speech-processing stage.
+message SpeechOptions {
+  // Server-registered model identity; never a filesystem path or download URL.
+  string model_id = 1;
+  // BCP-47 language hint; empty means model-supported autodetection.
+  string language = 2;
+  // Recognition or translation task.
+  SpeechTask task = 3;
+  // Include supported word/token timing and probability information.
+  bool word_timestamps = 4;
+  // Decoded-audio inference windows; does not change original source chunks.
+  SpeechWindowing windowing = 5;
+}
+
+// Audio-window policy, resolved and echoed in StreamOpened.
+message SpeechWindowing {
+  // Target inference window duration in milliseconds. Absent uses the server
+  // default; explicit zero is invalid. Subject to the model's context limit.
+  optional uint32 window_ms = 1;
+  // Audio repeated in fixed windows or on a forced speech-aware split. Absent
+  // uses the server default; zero disables overlap for fixed windows. Must be
+  // smaller than window_ms. Normal pause-based cuts do not repeat audio.
+  optional uint32 overlap_ms = 2;
+  // Fixed-duration windows or speech-aware boundaries.
+  ChunkingStrategy strategy = 3;
+  // Required for speech-aware mode; rejected in fixed-duration mode.
+  SpeechBoundaryOptions speech_boundary = 4;
+}
+
+// How decoded audio is divided into inference windows.
+enum ChunkingStrategy {
+  // Uses the server default; the handshake always reports a concrete strategy.
+  CHUNKING_STRATEGY_UNSPECIFIED = 0;
+  // Fixed-duration windows with optional overlap.
+  CHUNKING_STRATEGY_FIXED = 1;
+  // Prefer detected non-speech intervals near the target duration.
+  CHUNKING_STRATEGY_SPEECH_AWARE = 2;
+}
+
+// Voice-activity-based boundary selection; detection is probabilistic.
+message SpeechBoundaryOptions {
+  // Server-registered VAD model, with its actual identity included in provenance.
+  string vad_model_id = 1;
+  // Minimum consecutive detected non-speech time required for a candidate cut.
+  // Must be positive. Detector lookahead contributes additional latency.
+  uint32 min_pause_ms = 2;
+  // Context retained on each side of detected speech. Cut only in the interior
+  // of a pause after allowing this margin at both ends; no audio is discarded.
+  uint32 speech_padding_ms = 3;
+  // Hard maximum window duration, including any fallback overlap. Must be at
+  // least window_ms and within the speech model's context limit.
+  uint32 max_window_ms = 4;
+  // Required behavior when no safe candidate is found before the hard limit.
+  NoPausePolicy no_pause_policy = 5;
+}
+
+// Explicit response to continuous speech or uncertain pause detection.
+enum NoPausePolicy {
+  // Invalid in an accepted speech-aware configuration.
+  NO_PAUSE_POLICY_UNSPECIFIED = 0;
+  // Split at the hard limit with positive overlap_ms, marking the forced cut.
+  NO_PAUSE_POLICY_SPLIT_WITH_OVERLAP = 1;
+  // Stop speech processing with RESOURCE_EXHAUSTED rather than cut known speech.
+  NO_PAUSE_POLICY_FAIL = 2;
+}
+
+// Speech tasks supported by the Whisper backend.
+enum SpeechTask {
+  // Resolves to transcription, and the resolved task is reported in the handshake.
+  SPEECH_TASK_UNSPECIFIED = 0;
+  // Preserve the spoken language.
+  SPEECH_TASK_TRANSCRIBE = 1;
+  // Translate speech to English; arbitrary target languages require another model.
+  SPEECH_TASK_TRANSLATE_TO_ENGLISH = 2;
+}
+
+// Identity of the software and model that produced an event.
+message Producer {
+  // Machine UUID, stable across restarts when configured by the operator.
+  string machine_id = 1;
+  // Service name.
+  string service = 2;
+  // Application release version.
+  string app_version = 3;
+  // Source revision or immutable build identity.
+  string build_id = 4;
+  // Backend library and its version, for example whisper.cpp or libavformat.
+  string library_version = 5;
+  // Actual execution backend, for example CPU, CUDA, Metal, or OpenVINO.
+  string execution_backend = 6;
+  // Loaded model ID; empty for non-model processing stages.
+  string model_id = 7;
+  // SHA-256 of loaded model content; absent for non-model stages.
+  bytes model_sha256 = 8;
+  // SHA-256 of the resolved processing configuration.
+  bytes configuration_sha256 = 9;
+}
+
+// Canonical envelope used for live delivery and replay.
+message StreamEvent {
+  // Identity used for ordering and deduplication.
+  Cursor cursor = 1;
+  // Identity of the stage that created this payload, preserved through relays.
+  Producer producer = 2;
+  // Wall-clock event creation time, not a media presentation timestamp.
+  google.protobuf.Timestamp emitted_at = 3;
+  // Typed payload; no JSON representation on the wire.
+  oneof payload {
+    // First event; confirms the resolved stream UUID and limits.
+    StreamOpened opened = 4;
+    // Exact source bytes, retained independently of derived representations.
+    SourceChunk source = 5;
+    // Decoded PCM for a downstream speech service.
+    AudioChunk audio = 6;
+    // Revision of one timed speech segment.
+    TranscriptSegment transcript = 7;
+    // Exactly one terminal event on normal protocol completion or processing failure.
+    StreamClosed closed = 8;
+  }
+}
+
+// Accepted stream declaration and its negotiated limits.
+message StreamOpened {
+  // Sanitized source description; excludes URLs with secrets and credentials.
+  DirectSource source = 1;
+  // Largest accepted source message in bytes.
+  uint32 max_chunk_bytes = 2;
+  // Upper bound on per-stream retained event bytes, not a durability guarantee.
+  uint64 retention_bytes = 3;
+  // Resolved, accepted speech tasks.
+  repeated SpeechOptions speech = 4;
+}
+
+// Sample-aligned audio data; the original source is never replaced by this projection.
+message AudioChunk {
+  // Contiguous chunk number within this decoded audio track, starting at one.
+  uint64 chunk_number = 1;
+  // Container track number.
+  uint32 track_id = 2;
+  // Sample index on the decoded track timeline.
+  uint64 first_sample = 3;
+  // Samples per channel per second.
+  uint32 sample_rate = 4;
+  // Channel count; PCM is interleaved.
+  uint32 channels = 5;
+  // IEEE-754 float32 little-endian PCM bytes, including complete sample frames only.
+  bytes pcm_f32le = 6;
+  // Presentation time when known, in microseconds from the source timeline origin.
+  optional int64 presentation_time_us = 7;
+  // True when the source timeline discontinuously changed before this chunk.
+  bool discontinuity = 8;
+}
+
+// A model-generated segment; revisions supersede the same segment UUID.
+message TranscriptSegment {
+  // Stable UUID across partial and final revisions.
+  string segment_id = 1;
+  // Increasing revision number, starting at one.
+  uint64 revision = 2;
+  // Final revisions are immutable.
+  bool final = 3;
+  // Source audio track number.
+  uint32 track_id = 4;
+  // Source timeline start, in microseconds.
+  int64 start_us = 5;
+  // Source timeline end, in microseconds.
+  int64 end_us = 6;
+  // Recognized or translated text exactly as returned by the engine.
+  string text = 7;
+  // Detected or configured source language.
+  string source_language = 8;
+  // Language of the result text.
+  string output_language = 9;
+  // Task that generated the text.
+  SpeechTask task = 10;
+  // Mean token log probability when the engine reports it.
+  optional double average_log_probability = 11;
+  // Engine tokens, preserving IDs and timings instead of inventing word boundaries.
+  repeated SpeechToken tokens = 12;
+}
+
+// A token emitted by the native inference API.
+message SpeechToken {
+  // Engine vocabulary ID.
+  int32 token_id = 1;
+  // Exact token text bytes; a token need not independently be valid UTF-8.
+  bytes text = 2;
+  // Native token probability when available.
+  optional float probability = 3;
+  // Source timeline start when available, in microseconds.
+  optional int64 start_us = 4;
+  // Source timeline end when available, in microseconds.
+  optional int64 end_us = 5;
+}
+
+// Final stream accounting; downstream processing drains before successful closure.
+message StreamClosed {
+  // Zero for success; otherwise the canonical gRPC status code.
+  int32 status_code = 1;
+  // Diagnostic with source secrets excluded.
+  string message = 2;
+  // Total accepted source chunks.
+  uint64 source_chunk_count = 3;
+  // Total accepted source bytes.
+  uint64 source_byte_count = 4;
+  // SHA-256 of all accepted source bytes, even for a failed partial stream.
+  bytes source_sha256 = 5;
+}
