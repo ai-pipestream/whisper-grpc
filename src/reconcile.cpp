@@ -202,12 +202,18 @@ void Reconciler::accept(const pb::SpeechHypothesis& h, uint32_t overlap) {
   size_t merged_bytes = 0;
   for (const auto& token : pending_) merged_bytes += token_bytes(token);
   if (merged_bytes > text_limit) throw Failure(grpc::StatusCode::RESOURCE_EXHAUSTED, "reconciliation text limit exceeded");
-  size_t stable = 0, safe_boundary = 0; std::string prefix;
+  size_t stable = 0, safe_boundary = 0, word_start = 0; std::string prefix;
   const auto cutoff = end - micros(overlap);
   for (const auto& token : pending_) {
     if (overlap && token.end_us() > cutoff) break;
+    if (token.has_parakeet() && token.parakeet().is_word_start()) word_start = stable;
     ++stable; prefix += rendered(token); if (utf8(prefix)) safe_boundary = stable;
   }
+  // Keep the entire native word revisable when its later pieces overlap.
+  // Otherwise the next window repeats the already-finalized word prefix.
+  if (stable < pending_.size() && pending_[stable].has_parakeet() &&
+      !pending_[stable].parakeet().is_word_start())
+    safe_boundary = std::min(safe_boundary, word_start);
   output(safe_boundary, true, status);
   uncertain_ = !pending_.empty() && status == pb::RECONCILIATION_STATUS_UNRESOLVED;
   if (!pending_.empty()) output(pending_.size(), false, pb::RECONCILIATION_STATUS_PENDING);

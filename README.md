@@ -45,8 +45,10 @@ against the reconciliation memory bound. Native Parakeet word-start markers
 restore separators in derived text when a new window drops its leading space;
 raw hypotheses and native token bytes remain intact. Empty hypotheses or speech
 entirely beyond the earlier window do not create text conflicts. These rules
-concern alignment, not ASR accuracy. It emits stable segment IDs
-with increasing revisions, preserves competing text as `UNRESOLVED` when a join
+concern alignment, not ASR accuracy. It keeps an entire Parakeet word provisional
+when its token pieces cross the overlap cutoff, so the next window can align
+the whole word. It emits stable segment IDs with increasing revisions,
+preserves competing text as `UNRESOLVED` when a join
 is ambiguous, and stops after validation or delivery failure. Raw hypotheses
 remain separate from these derived revisions. `reconcile_tests` covers repeated
 words, partial-word repair, ambiguous joins, UTF-8 token boundaries, track
@@ -156,6 +158,17 @@ followed by reuse of the same state and the exact English reference words.
 This does not qualify other recordings, languages or ARM execution. The service
 adapter requires the separate `parakeet_tests` gate above.
 
+**Open release failure:** `parakeet_pipeline_tests` adds direct WAV, Matroska,
+H.264/AAC and HTTP processing with subscriptions and hydration. The fixed AAC
+case currently fails: both Q8 and FP16 weights return an empty final window,
+omitting the last reference word. Keeping whole words provisional fixes a
+separate duplicated phrase at the overlap but does not repair this empty native
+result. The strict reference assertion remains in the release gate. Passing
+the standalone worker or WAV probe is not full video-pipeline qualification.
+Set `MEDIA_PIPELINE_TEST_CASE=3` and `MEDIA_PIPELINE_TRACE=1` when invoking
+`pipeline_tests MODEL VAD_MODEL JFK_WAV parakeet` to isolate the AAC case and
+print its hypotheses and revisions. CI runs every case by default.
+
 ```sh
 cmake -S . -B build
 cmake --build build --target parakeet_probe -j2
@@ -175,7 +188,8 @@ Each native CI job then fetches revision-pinned, SHA-256-checked tiny English,
 multilingual base, Silero and Parakeet models and runs seven model-backed executables:
 VAD, overlap reconciliation, worker inference, pipeline cancellation, the full
 audio/video speech pipeline, Spanish transcription/English translation, and
-Parakeet transcription, including the additional overlapping-window gate. The Spanish test is a functional gate on one attributed
+Parakeet transcription, including the overlapping-window and full-pipeline gates.
+The Spanish test is a functional gate on one attributed
 human recording, not a
 broad model accuracy benchmark. To run this qualification locally after the
 native image build:
