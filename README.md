@@ -280,6 +280,12 @@ advertise transcription only; multilingual weights also advertise translation
 to English. Discovery does not allocate a stream or run inference and remains
 available when all worker stream slots are occupied.
 
+Ingress discovery reports `minimum_window_advance_ms` when speech processing is
+configured. `window_ms - overlap_ms` must be at least 100 ms; smaller advances
+are rejected before processing, including a 30-second window advanced by only
+1 ms. The rule applies to the requested policy,
+not the remaining audio at end of stream: short final windows are still flushed.
+
 The worker cancels a stream after 120 seconds waiting for an incoming message,
 including its initial opening message. Set `WHISPER_WORKER_INPUT_IDLE_SECONDS`
 to an integer from 1 to 3600 to change this policy. The timer runs only while

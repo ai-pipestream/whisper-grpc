@@ -1,4 +1,5 @@
 #include "pipeline.h"
+#include "service.h"
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
@@ -6,6 +7,13 @@
 int main() {
   try {
     media::SpeechPipelineFactory factory("127.0.0.1:1");
+    media::Registry registry;
+    media::Service service(registry,&factory);
+    media::pb::GetServiceInfoRequest empty;
+    media::pb::GetServiceInfoResponse info;
+    if (!service.GetServiceInfo(nullptr,&empty,&info).ok() ||
+        !info.has_minimum_window_advance_ms() || info.minimum_window_advance_ms()!=100)
+      throw std::runtime_error("minimum advance missing from discovery");
     for (const auto& [window,overlap,expected] : {
         std::tuple{100u,0u,true}, {1000u,900u,true}, {30000u,29900u,true},
         {99u,0u,false}, {1000u,901u,false}, {30000u,29999u,false}}) {

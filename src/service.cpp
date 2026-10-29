@@ -42,6 +42,10 @@ grpc::Status Service::GetServiceInfo(grpc::ServerContext*, const pb::GetServiceI
   info->set_max_subscribers(limits.max_subscribers);
   info->set_http_pull_configured(!http_.allowed_origins.empty());
   info->set_speech_processing_configured(processing_ != nullptr);
+  if (processing_) {
+    if (const auto advance = processing_->minimum_window_advance_ms())
+      info->set_minimum_window_advance_ms(*advance);
+  }
   return grpc::Status::OK;
 }
 

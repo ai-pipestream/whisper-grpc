@@ -41,6 +41,9 @@ message GetServiceInfoResponse {
   bool speech_processing_configured = 9;
   // Optional web UI descriptor. Absent when this deployment has no web UI.
   UiInfo ui = 10;
+  // Minimum configured window_ms minus overlap_ms for the speech processor.
+  // Absent when no such policy is configured. Short final windows remain valid.
+  optional uint32 minimum_window_advance_ms = 11;
 }
 
 // Shared shape used by service UIs across the parser family.
@@ -281,7 +284,8 @@ message SpeechWindowing {
   optional uint32 window_ms = 1;
   // Audio repeated in fixed windows or on a forced speech-aware split. Absent
   // uses the server default; zero disables overlap for fixed windows. Must be
-  // smaller than window_ms. Normal pause-based cuts do not repeat audio.
+  // smaller than window_ms by at least the discovered minimum advance.
+  // Normal pause-based cuts do not repeat audio.
   optional uint32 overlap_ms = 2;
   // Fixed-duration windows or speech-aware boundaries.
   ChunkingStrategy strategy = 3;

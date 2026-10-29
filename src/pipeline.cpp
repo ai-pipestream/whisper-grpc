@@ -223,6 +223,8 @@ void SpeechPipelineFactory::resolve(pb::OpenStream& request) const {
     if (w->strategy() == pb::CHUNKING_STRATEGY_UNSPECIFIED) w->set_strategy(pb::CHUNKING_STRATEGY_FIXED);
     if (options.task() == pb::SPEECH_TASK_UNSPECIFIED) options.set_task(pb::SPEECH_TASK_TRANSCRIBE);
     require(w->window_ms() > 0 && w->window_ms() <= 30000 && w->overlap_ms() < w->window_ms(), "invalid speech window durations");
+    require(w->window_ms()-w->overlap_ms() >= minimum_advance_ms,
+            "configured speech windows must advance by at least 100 ms");
     if (w->strategy() == pb::CHUNKING_STRATEGY_SPEECH_AWARE) {
       require(w->has_speech_boundary() && w->speech_boundary().vad_model_id() == "silero-v5.1.2", "qualified VAD model ID required");
       if (vad_weights_.empty()) throw Failure(grpc::StatusCode::UNIMPLEMENTED, "VAD weights are not configured");
