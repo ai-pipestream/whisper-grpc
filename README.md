@@ -521,7 +521,12 @@ Packet fragments retain a packet number, track index, byte offset, total
 packet length, source position when available, native PTS/DTS and rational
 time base, flags and side data. Video packets are not transcoded or claimed
 to be independently playable segments. Metadata includes codec initialization
-bytes, source audio/video dimensions and native dictionary entries. The source
+bytes, source audio/video dimensions, native dictionary entries, and track-level
+side data such as video display matrices. `TrackInfo.side_data` retains each
+native type, library-provided name and exact bytes, separately from packet side
+data. A track permits at most 128 entries and 128 KiB of side-data bytes;
+oversized metadata fails explicitly. Tests carry a rotated MP4 through decoding,
+live gRPC and hydration and compare the matrix bytes at each stage. The source
 bytes preserve native fields that this metadata projection does not yet expose.
 
 FFmpeg pulls directly from gRPC through a custom in-memory AVIO reader. The

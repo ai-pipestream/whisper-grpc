@@ -51,6 +51,29 @@ void metadata(google::protobuf::RepeatedPtrField<pb::NativeMetadata>* out, AVDic
     item->set_value(entry->value, value_size);
   }
 }
+template<class Parameters, class Stream>
+void track_side_data(pb::TrackInfo* out, const Parameters* parameters, const Stream* stream) {
+  const AVPacketSideData* entries;
+  int count;
+  // FFmpeg moved track side data into codec parameters. Feature detection
+  // avoids using deprecated stream fields when the new representation exists.
+  if constexpr (requires { parameters->coded_side_data; }) {
+    entries = parameters->coded_side_data; count = parameters->nb_coded_side_data;
+  } else {
+    entries = stream->side_data; count = stream->nb_side_data;
+  }
+  limit(count >= 0 && count <= 128, "too many track side-data entries");
+  size_t total = 0;
+  for (int i = 0; i < count; ++i) {
+    const auto& side = entries[i];
+    limit(side.size <= kEventBytes / 2 - total, "track side data exceeds limit");
+    total += side.size;
+    auto* data = out->add_side_data();
+    data->set_native_type(side.type);
+    if (const auto* name = av_packet_side_data_name(side.type)) data->set_type_name(name);
+    if (side.size) data->set_data(side.data, side.size);
+  }
+}
 pb::TrackKind kind(AVMediaType value) {
   switch (value) {
     case AVMEDIA_TYPE_AUDIO: return pb::TRACK_KIND_AUDIO;
@@ -228,6 +251,7 @@ class Decoder {
       out->set_bit_rate(parameters->bit_rate);
       out->set_profile(parameters->profile);
       out->set_level(parameters->level);
+      track_side_data(out, parameters, track);
       limit(info->ByteSizeLong() <= kEventBytes, "media description exceeds limit");
     }
     const auto serialized = info->SerializeAsString();

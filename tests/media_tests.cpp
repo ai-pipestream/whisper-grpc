@@ -1,5 +1,9 @@
 #include "service.h"
 #include "media_fixture.h"
+extern "C" {
+#include <libavcodec/packet.h>
+#include <libavutil/display.h>
+}
 
 #include <grpcpp/grpcpp.h>
 
@@ -457,13 +461,15 @@ void malformed_wire_input() {
 
 void wire_live_decoding() {
   RunningServer running;
+  int32_t matrix[9]; av_display_rotation_set(matrix,90);
+  const std::string rotation(reinterpret_cast<const char*>(matrix),sizeof matrix);
   // FFmpeg probes 64 KiB of PCM WAV for embedded SPDIF during header parsing.
   // Use six seconds so the first half includes that probe, while holding back
   // three full seconds until actual PCM arrives. NUT has no such startup probe.
   for (const auto& fixture : {std::pair{wav_fixture(16000, 1, 6), uint64_t{96000}},
                               std::pair{nut_fixture(), uint64_t{48000}},
                               std::pair{matroska_fixture().bytes, uint64_t{48000}},
-                              std::pair{fragmented_mp4_fixture(), uint64_t{0}}}) {
+                              std::pair{fragmented_mp4_fixture({},90), uint64_t{0}}}) {
     const auto& data = fixture.first;
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + 5s);
@@ -484,6 +490,8 @@ void wire_live_decoding() {
     uint64_t audio_samples = 0;
     std::string reconstructed;
     bool saw_audio = false, saw_metadata = false, saw_packet = false, closed = false;
+    bool saw_rotation = false;
+    std::string latest_metadata;
     auto observe = [&](const pb::StreamEvent& event) {
       if (event.has_source()) reconstructed += event.source().data();
       if (event.has_audio()) {
@@ -493,6 +501,14 @@ void wire_live_decoding() {
         check(event.producer().library_version().find("libavcodec/") != std::string::npos, "decoder provenance absent");
       }
       saw_metadata |= event.has_media_info();
+      if (event.has_media_info()) {
+        latest_metadata=event.media_info().SerializeAsString();
+        for (const auto& track:event.media_info().tracks())
+          for (const auto& side:track.side_data()) if(side.native_type()==AV_PKT_DATA_DISPLAYMATRIX) {
+            check(side.data()==rotation,"wire display matrix changed bytes");
+            saw_rotation=true;
+          }
+      }
       saw_packet |= event.has_packet();
       if (event.has_closed()) {
         closed = true;
@@ -519,6 +535,7 @@ void wire_live_decoding() {
         audio_samples >= 96000 && audio_samples <= 97024;
     check(closed && saw_metadata && saw_packet && duration_ok, "wire decode missing output");
     check(reconstructed == data, "decoded path changed original source bytes");
+    if (!fixture.second) check(saw_rotation,"wire track rotation missing");
 
     grpc::ClientContext hydration_context;
     hydration_context.set_deadline(std::chrono::system_clock::now() + 5s);
@@ -530,6 +547,7 @@ void wire_live_decoding() {
     check(listener->Read(&item) && item.has_snapshot_begin(), "media hydration missing begin");
     check(listener->Read(&item) && item.has_snapshot(), "media hydration missing state");
     check(item.snapshot().has_media_info() && item.snapshot().producers_size() == 2, "media hydration missing metadata or producer");
+    check(item.snapshot().media_info().SerializeAsString()==latest_metadata,"hydration changed native track metadata");
     hydration_context.TryCancel();
     while (listener->Read(&item)) {}
     check(listener->Finish().error_code() == grpc::StatusCode::CANCELLED, "media hydration cancel failed");
