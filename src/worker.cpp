@@ -53,6 +53,8 @@ grpc::Status SpeechWorker::GetModelInfo(grpc::ServerContext*, const pb::GetModel
   info->set_backend(model_.backend_kind());
   info->set_accepts_language_hint(model_.supports_language_hint());
   info->set_reports_language(model_.reports_language());
+  if (const auto minimum = model_.minimum_encoder_context_ms())
+    info->set_minimum_encoder_context_ms(*minimum);
   info->add_tasks(pb::SPEECH_TASK_TRANSCRIBE);
   if (model_.supports_translation()) info->add_tasks(pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH);
   info->set_max_window_samples(max_window_samples);
@@ -136,6 +138,8 @@ grpc::Status SpeechWorker::Transcribe(grpc::ServerContext* context,
       hypothesis->set_window_number(input.window_number()); hypothesis->set_track_id(accepted.track_id());
       hypothesis->set_first_sample(input.first_sample()); hypothesis->set_first_new_sample(input.first_new_sample());
       hypothesis->set_sample_count(samples); hypothesis->set_boundary(input.boundary());
+      if (const auto preparation = model_.encoder_context(samples))
+        *hypothesis->mutable_encoder_context() = *preparation;
       *hypothesis->mutable_producer() = producer;
       for (auto& segment : segments) *hypothesis->add_segments() = std::move(segment);
       if (response.ByteSizeLong() > 4 * 1024 * 1024)

@@ -746,6 +746,9 @@ message GetModelInfoResponse {
   bool reports_language = 12;
   // Whether multilingual was determined from the loaded model.
   bool multilingual_known = 13;
+  // Minimum native encoder context, when the backend applies one. This is
+  // model-only padding, not additional source audio or input buffering.
+  optional uint32 minimum_encoder_context_ms = 14;
 }
 
 // One worker input message; audio windows already contain any intended overlap.
@@ -853,4 +856,18 @@ message SpeechHypothesis {
   // Native presentation time of the first window sample, when known. When
   // absent, segment times remain relative to the decoded sample timeline.
   optional int64 presentation_time_us = 10;
+  // Actual analysis and encoder sizes when the backend exposes them.
+  EncoderContext encoder_context = 11;
+}
+
+// Model-only preparation; SpeechHypothesis.sample_count remains the real input.
+message EncoderContext {
+  // PCM samples supplied to feature extraction, including synthetic zero padding.
+  uint32 analysis_samples = 1;
+  // Feature frames generated from analysis_samples, including centered padding.
+  uint32 feature_frames = 2;
+  // Encoder input frames; extra frames are zeros and masked from attention keys.
+  uint32 encoder_frames = 3;
+  // Samples per feature-frame step at the reported worker sample rate.
+  uint32 frame_hop_samples = 4;
 }

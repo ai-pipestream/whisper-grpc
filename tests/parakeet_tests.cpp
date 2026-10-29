@@ -68,6 +68,18 @@ int main(int argc, char** argv) {
     try {model.infer(window,7,options,[]{return false;});}
     catch(const media::Failure& e) {rejected=e.code==grpc::StatusCode::INVALID_ARGUMENT;}
     check(rejected,"nonfinite PCM accepted"); window.samples=samples;
+    // Short inputs must not divide by zero in feature normalization or turn
+    // encoder-only padding into recognized source speech.
+    for (size_t count : {size_t(1), size_t(160), size_t(320), size_t(8000)}) {
+      media::SpeechWindow silence{1,0,0,media::WindowBoundary::End,std::vector<float>(count,0.0f)};
+      const auto preparation=*model.encoder_context(count);
+      check(preparation.analysis_samples()==std::max<size_t>(320,count) &&
+            preparation.feature_frames()==preparation.analysis_samples()/160+1 &&
+            preparation.encoder_frames()==400 && preparation.frame_hop_samples()==160,
+            "incorrect short-input analysis accounting");
+      check(model.infer(silence,7,options,[]{return false;}).empty(),"short silence produced speech");
+      check(silence.samples.size()==count,"analysis padding changed source samples");
+    }
     media::SpeechWorker worker(model);
     grpc::ServerBuilder builder; int port=0;
     builder.AddListeningPort("127.0.0.1:0",grpc::InsecureServerCredentials(),&port);
@@ -88,7 +100,9 @@ int main(int argc, char** argv) {
     check(info.backend()==media::pb::SPEECH_BACKEND_KIND_PARAKEET && !info.multilingual_known() &&
           !info.accepts_language_hint() && !info.reports_language() && info.tasks_size()==1 &&
           info.tasks(0)==media::pb::SPEECH_TASK_TRANSCRIBE && info.producer().model_sha256()==model.model_hash() &&
-          info.producer().library_version()==model.engine_version(),"incorrect Parakeet capabilities/provenance");
+          info.producer().library_version()==model.engine_version() &&
+          info.has_minimum_encoder_context_ms() && info.minimum_encoder_context_ms()==4000,
+          "incorrect Parakeet capabilities/provenance");
     for(int invalid=0;invalid<3;++invalid) {
       auto bad=options;
       if(invalid==0) bad.set_task(media::pb::SPEECH_TASK_TRANSLATE_TO_ENGLISH);
@@ -122,6 +136,9 @@ int main(int argc, char** argv) {
     // Result must arrive before finish; successful inference also proves recovery after native aborts.
     check(rpc->Read(&response) && response.has_hypothesis(),"hypothesis buffered until finish");
     const auto hypothesis=response.hypothesis(); std::string text; unsigned tokens=0;
+    check(hypothesis.sample_count()==samples.size() && hypothesis.has_encoder_context() &&
+          hypothesis.encoder_context().SerializeAsString()==model.encoder_context(samples.size())->SerializeAsString(),
+          "missing encoder context or changed source sample count");
     for(const auto& segment:hypothesis.segments()) {
       check(segment.track_id()==7 && segment.source_language().empty() && segment.output_language().empty() &&
             segment.task()==media::pb::SPEECH_TASK_TRANSCRIBE && !segment.final(),"invented language or wrong segment identity");

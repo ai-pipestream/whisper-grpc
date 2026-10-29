@@ -158,13 +158,25 @@ followed by reuse of the same state and the exact English reference words.
 This does not qualify other recordings, languages or ARM execution. The service
 adapter requires the separate `parakeet_tests` gate above.
 
-**Open release failure:** `parakeet_pipeline_tests` adds direct WAV, Matroska,
-H.264/AAC and HTTP processing with subscriptions and hydration. The fixed AAC
-case currently fails: both Q8 and FP16 weights return an empty final window,
-omitting the last reference word. Keeping whole words provisional fixes a
-separate duplicated phrase at the overlap but does not repair this empty native
-result. The strict reference assertion remains in the release gate. Passing
-the standalone worker or WAV probe is not full video-pipeline qualification.
+`parakeet_pipeline_tests` covers direct WAV, Matroska, H.264/AAC and HTTP
+processing with subscriptions and hydration. The AAC case exposed an empty
+native final window with both Q8 and FP16 weights. Fresh model state and removal
+of trailing AAC padding did not repair it; a larger native encoder context did.
+The adapter now uses at least 400 feature frames (four seconds of encoder
+context), without waiting for more input or extending the source audio. Longer
+windows keep all their feature frames. The native attention mask excludes
+encoder-only padding as keys, and `PatchParakeetContext.cmake` prevents decoding
+past the real feature frames. This is an empirically qualified inference policy,
+not a claim that all short speech will be recognized correctly.
+
+Inputs shorter than 320 samples receive model-only zeros up to 320 samples,
+ensuring the native feature normalizer has two valid frames. Discovery reports
+`minimum_encoder_context_ms`; each hypothesis carries typed `encoder_context`
+counts for analysis samples, feature frames, encoder frames and frame hop.
+`sample_count` and the original PCM remain unchanged. Tests cover short silence,
+metadata, native cancellation, fixed and smart video pipelines, and the strict
+reference transcript. Passing the standalone worker or WAV probe alone is not
+full video-pipeline qualification.
 Set `MEDIA_PIPELINE_TEST_CASE=3` and `MEDIA_PIPELINE_TRACE=1` when invoking
 `pipeline_tests MODEL VAD_MODEL JFK_WAV parakeet` to isolate the AAC case and
 print its hypotheses and revisions. CI runs every case by default.

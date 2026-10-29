@@ -22,6 +22,8 @@ class SpeechBackend {
   virtual bool reports_language() const = 0;
   virtual pb::SpeechBackendKind backend_kind() const = 0;
   virtual std::string engine_version() const = 0;
+  virtual std::optional<uint32_t> minimum_encoder_context_ms() const { return std::nullopt; }
+  virtual std::optional<pb::EncoderContext> encoder_context(size_t) const { return std::nullopt; }
 };
 // A native CPU model instance. Model bytes are supplied by operator-controlled
 // startup configuration, never by an inference request. Calls are serialized.

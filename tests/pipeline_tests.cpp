@@ -97,6 +97,10 @@ void http_pipeline(const media::SpeechPipelineFactory& factory, const media::Spe
     if (event.has_packet() && event.packet().track_id()==0) ++packets;
     if (event.has_hypothesis()) {
       check(event.hypothesis().track_id()==1 && event.producer().model_sha256()==model_hash, "HTTP speech provenance mismatch");
+      const auto prepared=model.encoder_context(event.hypothesis().sample_count());
+      check(event.hypothesis().has_encoder_context()==prepared.has_value() &&
+            (!prepared || event.hypothesis().encoder_context().SerializeAsString()==prepared->SerializeAsString()),
+            "HTTP encoder preparation metadata mismatch");
       hypothesis = true; feed.release = true;
     }
     if (event.has_transcript()) {
@@ -252,6 +256,9 @@ int main(int argc, char** argv) {
           if (trace) std::cerr << "HYPOTHESIS " << event.hypothesis().DebugString() << '\n';
           saw_hypothesis = true; ++hypotheses;
           const auto& h = event.hypothesis();
+          const auto prepared=model.encoder_context(h.sample_count());
+          evidence_ok &= h.has_encoder_context()==prepared.has_value() &&
+              (!prepared || h.encoder_context().SerializeAsString()==prepared->SerializeAsString());
           evidence_ok &= h.track_id()==(mp4 ? 1u : 0u);
           evidence_ok &= event.producer().model_sha256() == model.model_hash() && h.contributors_size() == 1;
           if (smart) evidence_ok &= h.contributors(0).model_sha256() == media::sha256(vad);

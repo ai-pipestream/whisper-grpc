@@ -1,5 +1,6 @@
 #include "parakeet_model.h"
 #include "parakeet.h"
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <mutex>
@@ -34,6 +35,17 @@ const std::string& ParakeetModel::model_hash() const { return impl_->hash; }
 const std::string& ParakeetModel::model_id() const { return impl_->id; }
 int ParakeetModel::threads() const { return impl_->threads; }
 std::string ParakeetModel::engine_version() const { return std::string("whisper.cpp/parakeet/") + parakeet_version(); }
+std::optional<pb::EncoderContext> ParakeetModel::encoder_context(size_t samples) const {
+  if (!samples || samples > 30 * 16000)
+    throw Failure(grpc::StatusCode::INVALID_ARGUMENT, "invalid encoder input length");
+  pb::EncoderContext context;
+  // The native normalizer requires at least two valid feature frames.
+  context.set_analysis_samples(std::max<size_t>(samples, 320));
+  context.set_frame_hop_samples(160);
+  context.set_feature_frames(context.analysis_samples() / context.frame_hop_samples() + 1);
+  context.set_encoder_frames(std::max(400u, context.feature_frames()));
+  return context;
+}
 void ParakeetModel::validate_options(const pb::SpeechOptions& options) const {
   if (options.model_id() != impl_->id || !options.language().empty() ||
       (options.task() != pb::SPEECH_TASK_UNSPECIFIED && options.task() != pb::SPEECH_TASK_TRANSCRIBE))
@@ -56,13 +68,22 @@ std::vector<pb::TranscriptSegment> ParakeetModel::infer(const SpeechWindow& wind
   auto params = parakeet_full_default_params(PARAKEET_SAMPLING_GREEDY);
   params.n_threads = impl_->threads;
   params.no_context = true;
+  const auto preparation = *encoder_context(window.samples.size());
+  params.audio_ctx = static_cast<int>(preparation.encoder_frames());
+  std::vector<float> padded;
+  std::span<const float> analysis = window.samples;
+  if (preparation.analysis_samples() > window.samples.size()) {
+    padded = window.samples;
+    padded.resize(preparation.analysis_samples(), 0.0f);
+    analysis = padded;
+  }
   params.abort_callback = [](void* opaque) noexcept {
     auto& a = *static_cast<Abort*>(opaque);
     try { return a.cancelled(); } catch (...) { a.error = std::current_exception(); return true; }
   };
   params.abort_callback_user_data = &abort;
   const int result = parakeet_full_with_state(impl_->context, impl_->state, params,
-                                              window.samples.data(), static_cast<int>(window.samples.size()));
+                                              analysis.data(), static_cast<int>(analysis.size()));
   if (abort.error) std::rethrow_exception(abort.error);
   if (cancelled()) throw Failure(grpc::StatusCode::CANCELLED, "speech cancelled");
   if (result) throw Failure(grpc::StatusCode::INTERNAL, "native Parakeet inference failed");
