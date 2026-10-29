@@ -147,6 +147,24 @@ int main() {
   check(out.size()==2 && out[0].text()+out[1].text()=="First Next" &&
         out[1].tokens(0).text()=="▁Next" && out[1].tokens(0).rendered_text()==" Next" &&
         next_word.SerializeAsString()==raw_next);
+  // A stable cutoff must not finalize the first piece of a word whose tail overlaps.
+  out.clear(); Reconciler split_word([&](auto s){out.push_back(std::move(s));});
+  auto before_cut=window(1,0,0,{{"your",1000000,1500000},{" co",2800000,2960000},
+      {"untry",2960000,3200000},{" can",3200000,3450000}});
+  for (int i=0; i<before_cut.segments(0).tokens_size(); ++i)
+    before_cut.mutable_segments(0)->mutable_tokens(i)->mutable_parakeet()->set_is_word_start(i!=2);
+  split_word.accept(before_cut,16000);
+  check(out.size()==2 && out[0].final() && out[0].text()=="your" &&
+        !out[1].final() && out[1].text()==" country can");
+  auto after_cut=window(2,48000,64000,{{"co",3000000,3100000},{"untry",3100000,3250000},
+      {" can",3250000,3500000},{" do",4000000,4200000}});
+  for (int i=0; i<after_cut.segments(0).tokens_size(); ++i)
+    after_cut.mutable_segments(0)->mutable_tokens(i)->mutable_parakeet()->set_is_word_start(i!=1);
+  split_word.accept(after_cut,0); split_word.finish(); text.clear();
+  for (const auto& s:out) if(s.final()) {
+    check(s.reconciliation()!=pb::RECONCILIATION_STATUS_UNRESOLVED); text+=s.text();
+  }
+  check(text=="your country can do");
   std::cout<<"reconciliation cases passed\n";
  } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

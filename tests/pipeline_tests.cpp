@@ -136,6 +136,11 @@ int main(int argc, char** argv) {
     if (argc != 4 && argc != 5) throw std::runtime_error("usage: pipeline_tests MODEL VAD_MODEL JFK_WAV [whisper|parakeet]");
     const std::string backend = argc == 5 ? argv[4] : "whisper";
     check(backend == "whisper" || backend == "parakeet", "unknown pipeline test backend");
+    const char* selected_case = std::getenv("MEDIA_PIPELINE_TEST_CASE");
+    const std::string case_name = selected_case ? selected_case : "all";
+    check(case_name == "all" || case_name == "0" || case_name == "1" || case_name == "2" ||
+          case_name == "3" || case_name == "4" || case_name == "http", "unknown pipeline test case");
+    const bool trace = std::getenv("MEDIA_PIPELINE_TRACE") != nullptr;
     const auto weights = read(argv[1]), vad = read(argv[2]), wav = read(argv[3]);
     size_t audio_offset = 0; std::string pcm16;
     pb::DecodeOptions decode; decode.set_emit_audio(true);
@@ -170,6 +175,7 @@ int main(int argc, char** argv) {
     factory.resolve(raw_only);
     check(!raw_only.speech(0).reconcile_transcript() && !raw_only.speech(0).word_timestamps(), "raw-only option overridden");
     for (int mode : {0, 1, 2, 3, 4}) {
+      if (case_name != "all" && case_name != std::to_string(mode)) continue;
       const bool smart = mode==2 || mode==4, video = mode!=0, mp4 = mode>=3;
       const auto& data = mp4 ? mp4_fixture : video ? video_fixture.bytes : wav;
       size_t video_packets = 0;
@@ -243,6 +249,7 @@ int main(int argc, char** argv) {
           ++video_packets;
         }
         if (event.has_hypothesis()) {
+          if (trace) std::cerr << "HYPOTHESIS " << event.hypothesis().DebugString() << '\n';
           saw_hypothesis = true; ++hypotheses;
           const auto& h = event.hypothesis();
           evidence_ok &= h.track_id()==(mp4 ? 1u : 0u);
@@ -255,6 +262,7 @@ int main(int argc, char** argv) {
           }
         }
         if (event.has_transcript()) {
+          if (trace) std::cerr << "TRANSCRIPT " << event.transcript().DebugString() << '\n';
           const auto& t = event.transcript();
           if (revisions.contains(t.segment_id())) {
             const auto& prior = revisions.at(t.segment_id());
@@ -295,6 +303,7 @@ int main(int argc, char** argv) {
       subscribe_context.TryCancel(); while (listener->Read(&item)) {} listener->Finish();
       std::cout << (mp4 ? (smart ? "Smart H.264/AAC MP4" : "Fixed H.264/AAC MP4") : smart ? "Smart Matroska video" : video ? "Fixed Matroska video" : "Fixed WAV") << " ingress -> worker -> hydrated output passed\n";
     }
-    http_pipeline(factory, model, mp4_fixture, (pcm16.size()/2+1599)/1600);
+    if (case_name == "all" || case_name == "http")
+      http_pipeline(factory, model, mp4_fixture, (pcm16.size()/2+1599)/1600);
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
