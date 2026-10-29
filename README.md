@@ -99,14 +99,14 @@ Validate the draft contract with `buf lint` and `buf build`.
 ### Alternative native speech backend qualification
 
 **Boundary qualification:** `parakeet_boundary_reference` uses four-second
-windows with one-second overlap. After the reconciliation fixes, the Debian
-Release build preserves the exact reference word sequence across all four
-windows. Both host and Debian Debug builds still omit the text in source
-interval 6–10s. Fresh model instances, direct native API calls, 1s of appended
-zero samples, and FP16 weights did not fix the host Debug result. The controlled
-Debian comparison uses the same toolchain and libraries for both build modes;
-the native inference difference remains open. The boundary gate stays required
-for release. Whisper remains the default backend.
+windows with one-second overlap. The exact reference word sequence passes in
+host Debug and controlled Debian Debug/Release runs after reconciliation fixes
+and a guarded patch to the pinned GGML scalar depthwise convolution. Explicit
+fused multiply-add prevents compiler-dependent accumulation rounding that lost
+words in Debug. A model-independent regression checks both memory layouts,
+F32/F16 weights, and single/multiple threads. This does not establish identical
+whole-model floating-point results or general speech accuracy across builds.
+The boundary gate stays required for release. Whisper remains the default backend.
 
 Run the boundary case with
 `ctest --test-dir build -R parakeet_boundary_reference --output-on-failure` after configuring
