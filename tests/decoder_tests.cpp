@@ -1,5 +1,9 @@
 #include "decoder.h"
 #include "media_fixture.h"
+extern "C" {
+#include <libavcodec/packet.h>
+#include <libavutil/display.h>
+}
 
 #include <algorithm>
 #include <bit>
@@ -211,6 +215,21 @@ void packet_fragmentation() {
   verify(fragments == 2 && offset == 256 * 256 * 3, "packet fragmentation lost payload");
 }
 
+void track_rotation_metadata() {
+  const auto result=decode(fragmented_mp4_fixture({},90), all());
+  int32_t expected[9]; av_display_rotation_set(expected,90);
+  bool found=false;
+  for (const auto& event:result.events) if(event.has_media_info())
+    for (const auto& track:event.media_info().tracks())
+      for (const auto& side:track.side_data()) if(side.native_type()==AV_PKT_DATA_DISPLAYMATRIX) {
+        verify(track.kind()==pb::TRACK_KIND_VIDEO,"rotation attached to wrong track");
+        verify(side.type_name()==av_packet_side_data_name(AV_PKT_DATA_DISPLAYMATRIX),"side data name missing");
+        verify(side.data()==std::string(reinterpret_cast<const char*>(expected),sizeof expected),"display matrix bytes changed");
+        found=true;
+      }
+  verify(found,"track display matrix missing from typed metadata");
+}
+
 int main() {
   try {
     wave_live_and_exact_samples();
@@ -220,7 +239,8 @@ int main() {
     fragmented_mp4();
     malformed_and_cancelled();
     packet_fragmentation();
-    std::cout << "7 native media tests passed\n";
+    track_rotation_metadata();
+    std::cout << "8 native media tests passed\n";
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

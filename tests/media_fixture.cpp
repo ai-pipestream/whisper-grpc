@@ -4,6 +4,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/display.h>
 }
 
 #include <algorithm>
@@ -24,6 +25,20 @@ void u32(std::string& out, uint32_t value) {
 }
 void require(int result) {
   if (result < 0) throw std::runtime_error("native fixture mux failed: " + std::to_string(result));
+}
+template<class Stream>
+void rotate(Stream* stream, int degrees) {
+  if (!degrees) return;
+  uint8_t* data = nullptr;
+  if constexpr (requires { stream->codecpar->coded_side_data; }) {
+    auto* side = av_packet_side_data_new(&stream->codecpar->coded_side_data,
+        &stream->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX, 9*sizeof(int32_t), 0);
+    if (side) data = side->data;
+  } else {
+    data = av_stream_new_side_data(stream, AV_PKT_DATA_DISPLAYMATRIX, 9*sizeof(int32_t));
+  }
+  if (!data) throw std::bad_alloc();
+  av_display_rotation_set(reinterpret_cast<int32_t*>(data), degrees);
 }
 struct Mux {
   AVFormatContext* format = nullptr;
@@ -219,7 +234,7 @@ VideoFixture matroska_fixture(std::string_view pcm16) {
   return result;
 }
 
-std::string fragmented_mp4_fixture(std::string_view pcm16) {
+std::string fragmented_mp4_fixture(std::string_view pcm16, int rotation) {
   if (pcm16.size()%2 || pcm16.size()>30*16000*2) throw std::invalid_argument("invalid MP4 fixture PCM");
   const int sample_rate = pcm16.empty() ? 48000 : 16000;
   const int frames = pcm16.empty() ? 60 : static_cast<int>((pcm16.size()/2 + 1599)/1600);
@@ -272,6 +287,7 @@ std::string fragmented_mp4_fixture(std::string_view pcm16) {
   if (!video_stream || !audio_stream) throw std::bad_alloc();
   video_stream->time_base = video.codec->time_base; audio_stream->time_base = audio.codec->time_base;
   require(avcodec_parameters_from_context(video_stream->codecpar, video.codec));
+  rotate(video_stream, rotation);
   require(avcodec_parameters_from_context(audio_stream->codecpar, audio.codec));
   av_dict_set(&options, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
   const auto header = avformat_write_header(mux.format, &options);

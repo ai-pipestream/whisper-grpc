@@ -11,4 +11,4 @@ struct VideoFixture {
   std::vector<std::string> video_packets;
 };
 VideoFixture matroska_fixture(std::string_view pcm16 = {});
-std::string fragmented_mp4_fixture(std::string_view pcm16 = {});
+std::string fragmented_mp4_fixture(std::string_view pcm16 = {}, int rotation = 0);
