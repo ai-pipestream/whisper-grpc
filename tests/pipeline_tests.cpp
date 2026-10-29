@@ -1,4 +1,5 @@
 #include "pipeline.h"
+#include "parakeet_model.h"
 #include "http_fixture.h"
 #include "service.h"
 #include "worker.h"
@@ -45,11 +46,15 @@ void check_reference(const std::string& text) {
     if (c >= 'a' && c <= 'z') { if (space && !normalized.empty()) normalized += ' '; normalized += c; space = false; }
     else if (c == ' ') space = true;
   }
-  check(normalized == "and so my fellow americans ask not what your country can do for you ask what you can do for your country",
+  const std::string expected = "and so my fellow americans ask not what your country can do for you ask what you can do for your country";
+  if (normalized != expected) std::cerr << "Expected: " << expected << "\nActual: " << normalized << '\n';
+  check(normalized == expected,
         "streamed final transcript lost or duplicated boundary words");
 }
-void http_pipeline(const media::SpeechPipelineFactory& factory, const std::string& model_hash,
+void http_pipeline(const media::SpeechPipelineFactory& factory, const media::SpeechBackend& model,
                    const std::string& data, size_t expected_video_packets) {
+  const auto& model_hash = model.model_hash();
+  const std::string language = model.reports_language() ? "en" : "";
   Fixture feed([&](int fd, Fixture& fixture) {
     send_bytes(fd, "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: " + std::to_string(data.size()) + "\r\n\r\n");
     const auto split = data.size()*3/4;
@@ -71,7 +76,7 @@ void http_pipeline(const media::SpeechPipelineFactory& factory, const std::strin
   grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now()+90s);
   pb::PullRequest request; request.mutable_open()->mutable_http()->set_url(feed.url);
   request.mutable_open()->mutable_decode()->set_emit_packets(true);
-  auto* speech = request.mutable_open()->add_speech(); speech->set_model_id("test-tiny.en");
+  auto* speech = request.mutable_open()->add_speech(); speech->set_model_id(model.model_id());
   speech->mutable_windowing()->set_window_ms(4000); speech->mutable_windowing()->set_overlap_ms(1000);
   auto pull = stub->Pull(&context, request);
   pb::PullResponse response;
@@ -96,7 +101,7 @@ void http_pipeline(const media::SpeechPipelineFactory& factory, const std::strin
     }
     if (event.has_transcript()) {
       const auto& t = event.transcript();
-      check(t.source_language()=="en" && t.output_language()=="en" && t.contributors_size()==2 &&
+      check(t.source_language()==language && t.output_language()==language && t.contributors_size()==2 &&
             t.contributors(0).model_sha256()==model_hash, "HTTP transcript provenance missing");
       if (revisions.contains(t.segment_id()))
         check(!revisions.at(t.segment_id()).final() && t.revision()==revisions.at(t.segment_id()).revision()+1,
@@ -128,7 +133,9 @@ void http_pipeline(const media::SpeechPipelineFactory& factory, const std::strin
 }
 int main(int argc, char** argv) {
   try {
-    if (argc != 4) throw std::runtime_error("usage: pipeline_tests WHISPER_MODEL VAD_MODEL JFK_WAV");
+    if (argc != 4 && argc != 5) throw std::runtime_error("usage: pipeline_tests MODEL VAD_MODEL JFK_WAV [whisper|parakeet]");
+    const std::string backend = argc == 5 ? argv[4] : "whisper";
+    check(backend == "whisper" || backend == "parakeet", "unknown pipeline test backend");
     const auto weights = read(argv[1]), vad = read(argv[2]), wav = read(argv[3]);
     size_t audio_offset = 0; std::string pcm16;
     pb::DecodeOptions decode; decode.set_emit_audio(true);
@@ -148,14 +155,18 @@ int main(int argc, char** argv) {
     }, [] {return false;}, decode);
     const auto video_fixture = matroska_fixture(pcm16);
     const auto mp4_fixture = fragmented_mp4_fixture(pcm16);
-    media::SpeechModel model(weights, "test-tiny.en", 4);
+    std::unique_ptr<media::SpeechBackend> selected;
+    if (backend == "parakeet") selected = std::make_unique<media::ParakeetModel>(weights, "parakeet-test", 4);
+    else selected = std::make_unique<media::SpeechModel>(weights, "test-tiny.en", 4);
+    auto& model = *selected;
+    const std::string language = model.reports_language() ? "en" : "";
     media::SpeechWorker worker(model); Server worker_server(worker);
     media::SpeechPipelineFactory factory(worker_server.address(), vad);
     media::Registry registry; media::Service ingress(registry, &factory); Server ingress_server(ingress);
     const char* external = std::getenv("MEDIA_PIPELINE_TEST_TARGET");
     auto stub = pb::MediaService::NewStub(grpc::CreateChannel(external ? external : ingress_server.address(), grpc::InsecureChannelCredentials()));
     pb::OpenStream raw_only; auto* raw = raw_only.add_speech();
-    raw->set_model_id("test-tiny.en"); raw->set_reconcile_transcript(false);
+    raw->set_model_id(model.model_id()); raw->set_reconcile_transcript(false);
     factory.resolve(raw_only);
     check(!raw_only.speech(0).reconcile_transcript() && !raw_only.speech(0).word_timestamps(), "raw-only option overridden");
     for (int mode : {0, 1, 2, 3, 4}) {
@@ -168,8 +179,8 @@ int main(int argc, char** argv) {
       open.mutable_open()->mutable_direct()->set_name(mp4 ? "reference.mp4" : video ? "reference.mkv" : "reference.wav");
       open.mutable_open()->mutable_decode()->set_emit_packets(video);
       auto* speech = open.mutable_open()->add_speech();
-      speech->set_model_id("test-tiny.en");
-      if (smart) speech->set_language("en");
+      speech->set_model_id(model.model_id());
+      if (smart && model.supports_language_hint()) speech->set_language("en");
       auto* w = speech->mutable_windowing(); w->set_window_ms(4000); w->set_overlap_ms(smart ? 500 : 1000);
       w->set_strategy(smart ? pb::CHUNKING_STRATEGY_SPEECH_AWARE : pb::CHUNKING_STRATEGY_FIXED);
       if (smart) {
@@ -239,8 +250,8 @@ int main(int argc, char** argv) {
           if (smart) evidence_ok &= h.contributors(0).model_sha256() == media::sha256(vad);
           for (const auto& segment : h.segments()) {
             text += segment.text();
-            evidence_ok &= !segment.final() && segment.source_language()=="en" &&
-                           segment.output_language()=="en" && segment.task()==pb::SPEECH_TASK_TRANSCRIBE;
+            evidence_ok &= !segment.final() && segment.source_language()==language &&
+                           segment.output_language()==language && segment.task()==pb::SPEECH_TASK_TRANSCRIBE;
           }
         }
         if (event.has_transcript()) {
@@ -249,7 +260,7 @@ int main(int argc, char** argv) {
             const auto& prior = revisions.at(t.segment_id());
             evidence_ok &= !prior.final() && t.revision() == prior.revision()+1;
           } else evidence_ok &= t.revision()==1;
-          evidence_ok &= t.source_language()=="en" && t.output_language()=="en" &&
+          evidence_ok &= t.source_language()==language && t.output_language()==language &&
                          t.task()==pb::SPEECH_TASK_TRANSCRIBE && t.producer().service()=="whisper-media-reconciliation" && t.contributors_size()==2 &&
                          t.contributors(0).model_sha256()==model.model_hash();
           if (t.final()) final_text += t.text();
@@ -284,6 +295,6 @@ int main(int argc, char** argv) {
       subscribe_context.TryCancel(); while (listener->Read(&item)) {} listener->Finish();
       std::cout << (mp4 ? (smart ? "Smart H.264/AAC MP4" : "Fixed H.264/AAC MP4") : smart ? "Smart Matroska video" : video ? "Fixed Matroska video" : "Fixed WAV") << " ingress -> worker -> hydrated output passed\n";
     }
-    http_pipeline(factory, model.model_hash(), mp4_fixture, (pcm16.size()/2+1599)/1600);
+    http_pipeline(factory, model, mp4_fixture, (pcm16.size()/2+1599)/1600);
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

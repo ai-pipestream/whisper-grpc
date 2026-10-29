@@ -24,5 +24,6 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true
   run translation_tests /models/ggml-base.bin tests/fixtures/minds14-es-0.wav minds14
   run parakeet_tests /models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin "$fixture"
   run speech_window_probe /models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin "$fixture" parakeet
+  run pipeline_tests /models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin /models/ggml-silero-v5.1.2.bin "$fixture" parakeet
   printf "All seven model-backed qualification executables passed\n"
   '
