@@ -69,9 +69,9 @@ source bytes exactly once, and decode the container continuously across upload
 chunks. Never concatenate overlapping compressed media bytes: this can corrupt
 the container or repeat audio. Decoded audio is the unit of overlap.
 
-For fixed mode, start evaluation with a 10-second window and 2 seconds of overlap:
-windows cover `[0, 10)`, `[8, 18)`, `[16, 26)` seconds. These are candidate
-defaults, not measured accuracy or latency guarantees. `SpeechWindowing`
+The implemented fixed-mode defaults are a 10-second window and 1 second of
+overlap: windows cover `[0, 10)`, `[9, 19)`, `[18, 28)` seconds. These are
+configuration defaults, not accuracy or latency guarantees. `SpeechWindowing`
 specifies the requested durations; the handshake reports resolved values.
 Validate `window_ms > 0` and `0 <= overlap_ms < window_ms`, model context
 limits, and a server minimum hop size so excessive overlap cannot cause
@@ -82,8 +82,9 @@ Overlap is created once by the stage forming inference windows. If those
 windows cross a gRPC boundary, the worker contract must carry an explicit
 window identity, source track, absolute first sample, sample count and
 overlap/new-audio boundary. A receiving worker must not add overlap again.
-The current `AudioChunk` messages describe contiguous decoded transport;
-they are not yet that window protocol.
+`AudioChunk` describes contiguous decoded transport. The implemented
+`InferenceWindow` worker message carries the pre-cut window and its real sample
+range; `SpeechHypothesis` returns the same identity and boundary metadata.
 
 Keep a provisional tail around the overlap boundary and reconcile it with
 the next decode using source timing and token/text alignment. Only finalize
@@ -216,6 +217,11 @@ during initial inspection. No remote changes have been made by this work.
 Whisper is a speech model. It transcribes and translates speech into English;
 it does not describe video scenes or provide arbitrary-language translation.
 Keep source-language transcription and translated text as separate results.
+
+The native Parakeet adapter is an implemented alternative for transcription;
+it does not translate or supply language labels. Both backends run through the
+same pipeline, subscription and Compose qualification. See README.md for the
+Parakeet encoder-context policy, metadata and pinned model licensing.
 
 Candidate optional workers are sherpa-onnx streaming ASR/VAD and speaker
 processing, plus a vision-language worker using llama.cpp/libmtmd for selected

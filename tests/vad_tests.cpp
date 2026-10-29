@@ -3,6 +3,7 @@
 #include "decoder.h"
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -15,6 +16,65 @@ std::string read(const char* path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) throw std::runtime_error("VAD test asset missing");
   return {std::istreambuf_iterator<char>(file), {}};
+}
+void mixed_speech(const std::string& model, const std::vector<float>& speech, bool accompaniment) {
+  constexpr size_t delay=11200;
+  std::vector<float> audio(16000+speech.size()+(accompaniment ? 0 : delay)+6*16000,0.0f);
+  for (size_t i=0; i<speech.size(); ++i) {
+    audio[16000+i] += 0.7f*speech[i];
+    if (!accompaniment) audio[16000+i+delay] += 0.3f*speech[i];
+    else {
+      // Project-authored tonal accompaniment. This is not a real music corpus.
+      constexpr double notes[]={220.0,261.6256,329.6276,293.6648};
+      constexpr double pi=3.14159265358979323846;
+      const double phase=2*pi*notes[(i/8000)%4]*static_cast<double>(i%8000)/16000;
+      const double envelope=std::sin(pi*static_cast<double>(i%8000)/8000);
+      audio[16000+i] += static_cast<float>(envelope*(0.025*std::sin(phase)+0.01*std::sin(2*phase)));
+    }
+  }
+  std::vector<float> reference;
+  std::vector<media::SpeechWindow> expected;
+  for (size_t chunk : {size_t(137),size_t(4096)}) {
+    size_t received=0, detected=0;
+    std::vector<float> probabilities;
+    std::vector<media::SpeechWindow> windows;
+    media::Windowing windowing({48000,80000,8000,4800,1600,true,false},
+                              [&](auto w){windows.push_back(std::move(w));});
+    media::VoiceActivity vad(model,[&](std::span<const float> pcm,float probability) {
+      check(std::isfinite(probability) && probability>=0 && probability<=1,"invalid mixed-speech probability");
+      check(received+pcm.size()<=audio.size() &&
+            std::equal(pcm.begin(),pcm.end(),audio.begin()+received),"mixed source samples changed");
+      received+=pcm.size(); probabilities.push_back(probability);
+      if(probability>=0.5f) detected+=pcm.size();
+      windowing.append(pcm,probability>=0.5f);
+    });
+    for(size_t i=0;i<audio.size();i+=chunk)
+      vad.append(std::span(audio).subspan(i,std::min(chunk,audio.size()-i)));
+    vad.finish(); windowing.finish();
+    check(received==audio.size() && detected>speech.size()/4,"mixed reference speech not detected");
+    uint64_t through=0;
+    for(const auto& w:windows) {
+      check(w.first_new_sample==through && w.samples.size()<=80000 &&
+            w.first_sample+w.samples.size()<=audio.size(),"mixed windows lost coverage or exceeded bound");
+      check(std::equal(w.samples.begin(),w.samples.end(),audio.begin()+w.first_sample),"mixed window changed source");
+      const bool repeated=w.first_sample<w.first_new_sample;
+      check(!repeated || w.first_new_sample-w.first_sample==8000,"mixed fallback overlap changed size");
+      through=w.first_sample+w.samples.size();
+    }
+    check(through==audio.size(),"mixed window tail missing");
+    check(std::any_of(windows.begin(),windows.end(),[](const auto& w){return w.boundary==media::WindowBoundary::Pause;}),
+          "mixed input never reached a confirmed pause");
+    if(reference.empty()) {reference=probabilities; expected=windows;}
+    else {
+      check(reference==probabilities && windows.size()==expected.size(),"mixed VAD depends on transport framing");
+      for(size_t i=0;i<windows.size();++i)
+        check(windows[i].first_sample==expected[i].first_sample &&
+              windows[i].samples==expected[i].samples && windows[i].boundary==expected[i].boundary,
+              "mixed chunk boundary depends on transport framing");
+    }
+  }
+  std::cout<<(accompaniment ? "Speech with synthetic tonal accompaniment" : "Overlapping utterances from the same speaker")
+           <<" preserved samples and bounded smart windows\n";
 }
 int main(int argc, char** argv) {
   try {
@@ -87,6 +147,8 @@ int main(int argc, char** argv) {
     try { media::VoiceActivity wrong("wrong", [](auto, auto) {}); }
     catch (const std::invalid_argument&) { rejected = true; }
     check(rejected, "unqualified VAD model accepted");
+    mixed_speech(model,speech,true);
+    mixed_speech(model,speech,false);
     size_t quiet_speech = 0;
     media::VoiceActivity quiet(model, [&](auto pcm, float p) { if (p >= 0.5f) quiet_speech += pcm.size(); });
     for (auto& sample : speech) sample *= 0.1f;

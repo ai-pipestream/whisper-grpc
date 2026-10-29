@@ -77,8 +77,13 @@ Other weights are rejected until their input framing is qualified. The adapter
 loads weights through an in-memory native loader, maintains state per track,
 and emits only real samples, excluding final model padding. Detection remains
 probabilistic. Tests cover reference speech at original and attenuated volume,
-silence, invalid PCM, transport-framing invariance,
+silence, speech with project-authored tonal accompaniment, overlapping utterances
+made by delaying the same speaker, invalid PCM, transport-framing invariance,
 pause-based windowing and discontinuities, not a broad acoustic benchmark.
+The mixed-audio checks assert finite probabilities, detected reference speech,
+exact source-sample coverage, bounded windows, and identical output across two
+transport chunk sizes. They do not establish accuracy on recorded music,
+different simultaneous speakers, or arbitrary background noise.
 
 `cmake/PatchWhisperVad.cmake` fixes the pinned upstream compute-error path to
 return failure instead of success with an untouched probability. Configuration
