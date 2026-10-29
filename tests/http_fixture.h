@@ -28,9 +28,10 @@ struct Fixture {
   std::atomic<bool> stop{false}, release{false};
   std::jthread thread;
   std::string url;
-  explicit Fixture(std::function<void(int, Fixture&)> serve) {
+  explicit Fixture(std::function<void(int, Fixture&)> serve, uint16_t port = 0) {
     listener = ::socket(AF_INET, SOCK_STREAM, 0); http_fixture_check(listener >= 0, "fixture socket failed");
     sockaddr_in address{}; address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
     http_fixture_check(::bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0, "fixture bind failed");
     socklen_t size = sizeof(address);
     http_fixture_check(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &size) == 0 && ::listen(listener, 1) == 0,

@@ -315,6 +315,25 @@ the default local image is built from this checkout, not a published release.
 Service startup order does not imply model readiness: wait for each service's
 gRPC health response before sending work.
 
+Native CI also runs `scripts/ci-compose.sh` for Whisper and Parakeet before
+publication. It starts this exact Compose file with the tested runtime image
+and provisioned model files. A separate client exercises direct WAV, Matroska,
+H.264/AAC, fixed and smart windows, and an HTTP feed through the running media
+container and its separate speech worker. It checks live transcripts, source
+digests, global subscriptions, hydration, and both containers' read-only model
+mounts and non-root users. The HTTP fixture uses the media container's isolated
+network namespace; it does not require an exposed host feed port. Each run
+removes only its own Compose project.
+
+After building native AMD64 images and fetching the qualification models:
+
+```sh
+sh scripts/ci-compose.sh local/whisper-grpc:ci-runtime-amd64 \
+  local/whisper-grpc:ci-builder-amd64 build/qualification-models whisper
+sh scripts/ci-compose.sh local/whisper-grpc:ci-runtime-amd64 \
+  local/whisper-grpc:ci-builder-amd64 build/qualification-models parakeet
+```
+
 The worker listens on loopback port 50073, with the weights mounted read-only.
 It accepts up to 32 open track/task RPCs per instance, with one inference slot.
 Concurrent inference requests beyond that slot return RESOURCE_EXHAUSTED,

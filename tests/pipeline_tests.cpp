@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <charconv>
 #include <cstring>
 #include <grpcpp/grpcpp.h>
 #include <atomic>
@@ -55,16 +56,24 @@ void http_pipeline(const media::SpeechPipelineFactory& factory, const media::Spe
                    const std::string& data, size_t expected_video_packets) {
   const auto& model_hash = model.model_hash();
   const std::string language = model.reports_language() ? "en" : "";
+  const char* external = std::getenv("MEDIA_PIPELINE_HTTP_TARGET");
+  uint16_t feed_port = 0;
+  if (const char* configured = std::getenv("MEDIA_PIPELINE_HTTP_PORT")) {
+    const auto end = configured + std::strlen(configured);
+    const auto parsed = std::from_chars(configured, end, feed_port);
+    check(parsed.ec == std::errc() && parsed.ptr == end && feed_port != 0,
+          "invalid HTTP fixture port");
+  }
   Fixture feed([&](int fd, Fixture& fixture) {
     send_bytes(fd, "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: " + std::to_string(data.size()) + "\r\n\r\n");
     const auto split = data.size()*3/4;
     send_bytes(fd, data.substr(0, split));
     while (!fixture.release && !fixture.stop) std::this_thread::sleep_for(1ms);
     if (!fixture.stop) send_bytes(fd, data.substr(split));
-  });
+  }, feed_port);
   media::Registry registry;
   media::Service service(registry, &factory, feed.policy()); Server server(service);
-  auto stub = pb::MediaService::NewStub(grpc::CreateChannel(server.address(), grpc::InsecureChannelCredentials()));
+  auto stub = pb::MediaService::NewStub(grpc::CreateChannel(external ? external : server.address(), grpc::InsecureChannelCredentials()));
   grpc::ClientContext live_context; live_context.set_deadline(std::chrono::system_clock::now()+90s);
   pb::SubscribeRequest subscription; subscription.add_payload_kinds(pb::PAYLOAD_KIND_TRANSCRIPT);
   subscription.mutable_hydration()->set_metadata(true);
@@ -72,7 +81,12 @@ void http_pipeline(const media::SpeechPipelineFactory& factory, const media::Spe
   auto live = stub->Subscribe(&live_context, subscription);
   pb::SubscribeResponse delivered;
   check(live->Read(&delivered) && delivered.has_snapshot_begin(), "global HTTP subscription begin missing");
-  check(live->Read(&delivered) && delivered.has_snapshot_end(), "empty HTTP snapshot missing end");
+  check(live->Read(&delivered), "HTTP snapshot ended early");
+  if (external) {
+    // The same packaged registry can retain the preceding direct-input cases.
+    while (delivered.has_snapshot()) check(live->Read(&delivered), "HTTP snapshot ended early");
+  }
+  check(delivered.has_snapshot_end(), "HTTP snapshot missing end");
   grpc::ClientContext context; context.set_deadline(std::chrono::system_clock::now()+90s);
   pb::PullRequest request; request.mutable_open()->mutable_http()->set_url(feed.url);
   request.mutable_open()->mutable_decode()->set_emit_packets(true);

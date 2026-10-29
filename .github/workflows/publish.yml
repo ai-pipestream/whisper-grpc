@@ -47,6 +47,10 @@ jobs:
         run: sh scripts/ci-worker-runtime.sh local/whisper-grpc:ci-runtime-${{ matrix.arch }} local/whisper-grpc:ci-builder-${{ matrix.arch }} build/qualification-models
       - name: Qualify the packaged Parakeet worker with real inference
         run: sh scripts/ci-worker-runtime.sh local/whisper-grpc:ci-runtime-${{ matrix.arch }} local/whisper-grpc:ci-builder-${{ matrix.arch }} build/qualification-models parakeet
+      - name: Qualify the Compose stack with both speech backends
+        run: |
+          sh scripts/ci-compose.sh local/whisper-grpc:ci-runtime-${{ matrix.arch }} local/whisper-grpc:ci-builder-${{ matrix.arch }} build/qualification-models whisper
+          sh scripts/ci-compose.sh local/whisper-grpc:ci-runtime-${{ matrix.arch }} local/whisper-grpc:ci-builder-${{ matrix.arch }} build/qualification-models parakeet
       - name: Log in to Docker Hub
         if: github.repository == 'ai-pipestream/whisper-grpc' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.publish)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
